@@ -21,6 +21,15 @@ jobs:
       # target, so skip that check (stage 1 std is built by our own stage1
       # rustc, which does know it).
       BOOTSTRAP_SKIP_TARGET_SANITY: "1"
+      # maximize-build-space fills the root volume with LVM image files and
+      # only leaves `root-reserve-mb` (10 GB) free on `/`, while it mounts the
+      # big build volume over $GITHUB_WORKSPACE. Cargo's registry cache and
+      # compiler temp files are by far the largest things a Rust build writes
+      # outside of `build/`, so keep them on the build volume instead of the
+      # root volume (whose free space is also needed by the runner's own
+      # _diag/*.log files -- losing that is what kills the worker itself).
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      TMPDIR: ${{ github.workspace }}/.tmp
 
     steps:
       - name: Maximize build space
@@ -46,6 +55,15 @@ jobs:
           # needs to walk history to find the upstream bors commit (see the
           # "single commit" step below), so the full history is required.
           fetch-depth: 0
+
+      - name: Prepare workspace dirs
+        # Has to come after checkout: `actions/checkout` runs `git clean -ffdx`
+        # (clean: true by default), which would delete anything created in the
+        # workspace beforehand. These dirs live on the big build volume.
+        run: |
+          mkdir -p "$CARGO_HOME" "$TMPDIR"
+          echo "=== disk after checkout ==="
+          df -h
 
       - name: Init the only submodules we need
         # Only these three are required:
@@ -76,6 +94,10 @@ jobs:
             curl \
             libssl-dev \
             pkg-config
+          # apt writes to the root volume, whose free space is capped at
+          # root-reserve-mb -- drop its caches again right away.
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
       - name: Put all local changes into a single commit on top of upstream
         # `llvm.download-ci-llvm = true` builds its download URL from `HEAD^1`
@@ -149,8 +171,13 @@ jobs:
 
       - name: Build Rust Toolchain
         run: |
+          # On any exit (including a failure) print the disk layout, so a
+          # "No space left on device" run tells us which volume filled up.
+          trap 'echo "::group::Disk usage at exit"; df -h; echo "::endgroup::"' EXIT
           CPU_CORES=$(nproc)
           echo "Building using ${CPU_CORES} threads..."
+          echo "=== disk before build ==="
+          df -h
           # `--stage` must be given explicitly under CI, otherwise bootstrap
           # asserts that an implicit stage resolves to 2 (config.rs:1274-1286).
           # Stage 1 is not usable for `x dist`: dist::Extended::make_run uses
