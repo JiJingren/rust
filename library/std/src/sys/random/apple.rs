@@ -14,7 +14,7 @@ pub fn fill_bytes(bytes: &mut [u8]) {
     assert_eq!(ret, libc::kCCSuccess, "failed to generate random data");
 }
 
-#[cfg(all(target_os = "ios", target_arch = "arm"))]
+#[cfg(target_os = "ios")]
 #[allow(non_snake_case, dead_code)]
 mod legacy_ios_shim {
     #![allow(dead_code)]
