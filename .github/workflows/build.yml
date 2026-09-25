@@ -36,11 +36,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # actions/checkout passes `--depth=N` to `git submodule update` only
+          # when fetch-depth > 0 (git-command-manager.ts:447). With
+          # fetch-depth: 0 it clones EVERY submodule at full history, which is
+          # what made this step take ~20 minutes. We only need 3 of them, so
+          # init those ourselves below.
+          submodules: false
           # llvm.download-ci-llvm resolves its artifact sha from HEAD^1 and
           # needs to walk history to find the upstream bors commit (see the
           # "single commit" step below), so the full history is required.
           fetch-depth: 0
+
+      - name: Init the only submodules we need
+        # Only these three are required:
+        #   library/backtrace - always required (session.rs:432)
+        #   src/tools/cargo   - tools = ["cargo"]
+        #   src/llvm-project  - required by the default `rust-src` dist step
+        # The doc books, rustc-perf, enzyme and gcc are not used
+        # (docs = false, no Enzyme, no GCC backend). If bootstrap turns out to
+        # need another one it will clone it itself via require_submodule.
+        run: |
+          git submodule sync
+          for p in library/backtrace src/tools/cargo src/llvm-project; do
+            git submodule update --init --depth 1 "$p" \
+              || git submodule update --init --force "$p" \
+              || true
+          done
+          git submodule status
 
       - name: Install dependencies
         run: |
@@ -108,7 +130,6 @@ jobs:
           ]
 
           description = "iOS-Legacy-Toolchain"
-          dist-stage = 1
           docs = false
           extended = true
           tools = ["cargo", "rustfmt"]
@@ -132,7 +153,11 @@ jobs:
           echo "Building using ${CPU_CORES} threads..."
           # `--stage` must be given explicitly under CI, otherwise bootstrap
           # asserts that an implicit stage resolves to 2 (config.rs:1274-1286).
-          python3 src/bootstrap/bootstrap.py dist --stage 1 --jobs ${CPU_CORES}
+          # Stage 1 is not usable for `x dist`: dist::Extended::make_run uses
+          # `top_stage - 1` (= 0) as its build compiler, so dist::Std would look
+          # for a stage-0 std that is never built, and RustcPrivateCompilers
+          # asserts `stage > 0`. Stage 2 is also what rust-lang CI uses.
+          python3 src/bootstrap/bootstrap.py dist --stage 2 --jobs ${CPU_CORES}
 
       - name: Package Toolchain Artifacts
         run: |
