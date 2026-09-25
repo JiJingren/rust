@@ -21,15 +21,6 @@ jobs:
       # target, so skip that check (stage 1 std is built by our own stage1
       # rustc, which does know it).
       BOOTSTRAP_SKIP_TARGET_SANITY: "1"
-      # maximize-build-space fills the root volume with LVM image files and
-      # only leaves `root-reserve-mb` (10 GB) free on `/`, while it mounts the
-      # big build volume over $GITHUB_WORKSPACE. Cargo's registry cache and
-      # compiler temp files are by far the largest things a Rust build writes
-      # outside of `build/`, so keep them on the build volume instead of the
-      # root volume (whose free space is also needed by the runner's own
-      # _diag/*.log files -- losing that is what kills the worker itself).
-      CARGO_HOME: ${{ github.workspace }}/.cargo-home
-      TMPDIR: ${{ github.workspace }}/.tmp
 
     steps:
       - name: Maximize build space
@@ -45,42 +36,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # actions/checkout passes `--depth=N` to `git submodule update` only
-          # when fetch-depth > 0 (git-command-manager.ts:447). With
-          # fetch-depth: 0 it clones EVERY submodule at full history, which is
-          # what made this step take ~20 minutes. We only need 3 of them, so
-          # init those ourselves below.
-          submodules: false
+          submodules: recursive
           # llvm.download-ci-llvm resolves its artifact sha from HEAD^1 and
           # needs to walk history to find the upstream bors commit (see the
           # "single commit" step below), so the full history is required.
           fetch-depth: 0
-
-      - name: Prepare workspace dirs
-        # Has to come after checkout: `actions/checkout` runs `git clean -ffdx`
-        # (clean: true by default), which would delete anything created in the
-        # workspace beforehand. These dirs live on the big build volume.
-        run: |
-          mkdir -p "$CARGO_HOME" "$TMPDIR"
-          echo "=== disk after checkout ==="
-          df -h
-
-      - name: Init the only submodules we need
-        # Only these three are required:
-        #   library/backtrace - always required (session.rs:432)
-        #   src/tools/cargo   - tools = ["cargo"]
-        #   src/llvm-project  - required by the default `rust-src` dist step
-        # The doc books, rustc-perf, enzyme and gcc are not used
-        # (docs = false, no Enzyme, no GCC backend). If bootstrap turns out to
-        # need another one it will clone it itself via require_submodule.
-        run: |
-          git submodule sync
-          for p in library/backtrace src/tools/cargo src/llvm-project; do
-            git submodule update --init --depth 1 "$p" \
-              || git submodule update --init --force "$p" \
-              || true
-          done
-          git submodule status
 
       - name: Install dependencies
         run: |
@@ -94,10 +54,6 @@ jobs:
             curl \
             libssl-dev \
             pkg-config
-          # apt writes to the root volume, whose free space is capped at
-          # root-reserve-mb -- drop its caches again right away.
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
 
       - name: Put all local changes into a single commit on top of upstream
         # `llvm.download-ci-llvm = true` builds its download URL from `HEAD^1`
@@ -152,6 +108,7 @@ jobs:
           ]
 
           description = "iOS-Legacy-Toolchain"
+          dist-stage = 1
           docs = false
           extended = true
           tools = ["cargo", "rustfmt"]
@@ -171,20 +128,11 @@ jobs:
 
       - name: Build Rust Toolchain
         run: |
-          # On any exit (including a failure) print the disk layout, so a
-          # "No space left on device" run tells us which volume filled up.
-          trap 'echo "::group::Disk usage at exit"; df -h; echo "::endgroup::"' EXIT
           CPU_CORES=$(nproc)
           echo "Building using ${CPU_CORES} threads..."
-          echo "=== disk before build ==="
-          df -h
           # `--stage` must be given explicitly under CI, otherwise bootstrap
           # asserts that an implicit stage resolves to 2 (config.rs:1274-1286).
-          # Stage 1 is not usable for `x dist`: dist::Extended::make_run uses
-          # `top_stage - 1` (= 0) as its build compiler, so dist::Std would look
-          # for a stage-0 std that is never built, and RustcPrivateCompilers
-          # asserts `stage > 0`. Stage 2 is also what rust-lang CI uses.
-          python3 src/bootstrap/bootstrap.py dist --stage 2 --jobs ${CPU_CORES}
+          python3 src/bootstrap/bootstrap.py dist --stage 1 --jobs ${CPU_CORES}
 
       - name: Package Toolchain Artifacts
         run: |
