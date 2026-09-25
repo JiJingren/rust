@@ -3,9 +3,9 @@ use crate::spec::{Os, Target, TargetMetadata, TargetOptions};
 
 pub(crate) fn target() -> Target {
     let (mut opts, llvm_target, arch) = base(Os::IOs, Arch::Armv7s, TargetEnv::Normal);
-    
+
     opts.has_thread_local = false;
-    
+
     Target {
         llvm_target,
         metadata: TargetMetadata {
