@@ -277,6 +277,7 @@ mod legacy_ios_shim {
 
                 unsafe extern "C" {
                     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+                    fn mach_absolute_time() -> u64;
                 }
 
                 let mut tb = MachTimebaseInfo { numer: 0, denom: 0 };
@@ -284,7 +285,7 @@ mod legacy_ios_shim {
                     return -1;
                 }
 
-                let ticks = u128::from(unsafe { libc::mach_absolute_time() });
+                let ticks = u128::from(unsafe { mach_absolute_time() });
                 let ns = ticks * u128::from(tb.numer) / u128::from(tb.denom);
                 let sec = ns / 1_000_000_000;
                 let nsec = ns % 1_000_000_000;
