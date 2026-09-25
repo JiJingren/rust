@@ -127,6 +127,55 @@ jobs:
           test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
           grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
 
+          # theos dumped these tbd stubs from `nm` output and only kept
+          # *defined* (T) symbols -- Apple's mem* entry points are *indirect*
+          # symbols ("I _memmove (indirect for __platform_memmove)"), so they
+          # are missing and ld64 reports them undefined while linking std.
+          # Re-add them to exports[0] (archs covers every triple we build).
+          python3 - <<'PY'
+          import os, pathlib, re, yaml
+
+          class L(yaml.SafeLoader):
+              pass
+
+          def tagged(loader, suffix, node):
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              return loader.construct_scalar(node)
+
+          L.add_multi_constructor('!', tagged)
+
+          PATCH = {
+              'usr/lib/system/libsystem_c.tbd':
+                  ['_memmove', '_memset', '_memcmp', '_memcpy'],
+              'usr/lib/system/libsystem_platform.tbd':
+                  ['_memset_pattern16'],
+          }
+          sdk = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'iPhoneOS10.3.sdk'
+          for rel, syms in PATCH.items():
+              p = sdk / rel
+              t = p.read_text()
+              d = yaml.load(re.sub(r'^--- !\S+', '---', t, flags=re.M), Loader=L)
+              have = set()
+              for e in d['exports']:
+                  for v in e.values():
+                      if isinstance(v, list):
+                          have |= set(v)
+              add = [s for s in syms if s not in have]
+              if not add:
+                  print(f'{rel}: already present')
+                  continue
+              i = t.index('symbols:')
+              j = t.index('[', i)
+              p.write_text(t[:j + 1] + ' ' + ', '.join(add) + ',' + t[j + 1:])
+              d2 = yaml.load(re.sub(r'^--- !\S+', '---', p.read_text(), flags=re.M), Loader=L)
+              for s in add:
+                  assert s in d2['exports'][0]['symbols'], f'{s} missing after patch'
+              print(f'{rel}: added {add} for archs={d["exports"][0]["archs"]}')
+          PY
+
           # iOS 16.5: tbd-v4 targets [ armv7-ios, armv7s-ios, arm64-ios,
           # arm64e-ios ] -- the only source of arm64e stubs. No simulator
           # archs, hence the split.
