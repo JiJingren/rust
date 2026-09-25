@@ -1,0 +1,101 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          root-reserve-mb: 10240
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ninja-build \
+            cmake \
+            git \
+            python3 \
+            curl \
+            libssl-dev \
+            pkg-config
+
+      - name: Set up Ninja execution environment
+        run: |
+          echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
+
+      - name: Generate bootstrap config.toml
+        run: |
+          cat << 'EOF' > config.toml
+          change-id = 116881
+
+          [llvm]
+          targets = "ARM;AArch64;X86"
+          experimental-targets = ""
+          link-shared = false
+          thin-lto = true
+          ninja = true
+
+          [build]
+          build = "x86_64-unknown-linux-gnu"
+          host = ["x86_64-unknown-linux-gnu"]
+          
+          target = [
+            "x86_64-unknown-linux-gnu",
+            "armv7-apple-ios",
+            "armv7s-apple-ios",
+            "aarch64-apple-ios",
+            "arm64e-apple-ios",
+            "i386-apple-ios",
+            "x86_64-apple-ios"
+          ]
+
+          docs = false
+          extended = true
+          tools = ["cargo", "rustfmt"]
+          python = "python3"
+
+          [rust]
+          codegen-units = 0
+          debug = false
+          debug-assertions = false
+          overflow-checks = false
+          channel = "nightly"
+          description = "iOS-Legacy-Toolchain"
+          rpath = true
+
+          [dist]
+          src-tarball = false
+          EOF
+
+      - name: Build Rust Toolchain
+        run: |
+          CPU_CORES=$(nproc)
+          echo "Building using ${CPU_CORES} threads..."
+          python3 x.py dist --jobs ${CPU_CORES}
+
+      - name: Package Toolchain Artifacts
+        run: |
+          mkdir -p dist_output
+          cp -r build/dist/*.tar.gz dist_output/ || true
+
+      - name: Upload Toolchain Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ios-linux-x86_64
+          path: dist_output/
+          retention-days: 7
