@@ -260,7 +260,7 @@ mod legacy_ios_shim {
                 let tv = unsafe { tv.assume_init() };
                 unsafe {
                     (*tp).tv_sec = tv.tv_sec;
-                    (*tp).tv_nsec = tv.tv_usec * 1000;
+                    (*tp).tv_nsec = (tv.tv_usec as libc::c_long) * 1000;
                 }
                 0
             }
