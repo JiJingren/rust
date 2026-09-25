@@ -16,6 +16,11 @@ jobs:
       # No C is actually compiled for the apple targets, so this is only used
       # for that early-exit.
       SDKROOT: /usr
+      # sanity.rs checks every build.target against `stage0 --print target-list`.
+      # The stage0 beta does not know the locally re-added `armv7-apple-ios`
+      # target, so skip that check (stage 1 std is built by our own stage1
+      # rustc, which does know it).
+      BOOTSTRAP_SKIP_TARGET_SANITY: "1"
 
     steps:
       - name: Maximize build space
