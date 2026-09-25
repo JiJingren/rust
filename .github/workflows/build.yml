@@ -207,8 +207,9 @@ jobs:
 
           # Link the Apple targets with the Darwin-flavored clang instead of
           # whatever `cc` bootstrap finds (GNU ld cannot emit Mach-O). The
-          # host target keeps the default linker. `${{ ... }}` is expanded by
-          # Actions before this heredoc ever reaches the shell.
+          # host target keeps the default linker. The github.workspace
+          # expressions are expanded by Actions before this heredoc ever
+          # reaches the shell.
           [target.armv7-apple-ios]
           linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
 
