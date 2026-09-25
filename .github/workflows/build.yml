@@ -7,6 +7,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      # cc-rs runs `xcrun --show-sdk-path` for every apple target while bootstrap
+      # probes a C compiler for each entry in build.target
+      # (src/bootstrap/src/utils/cc_detect.rs). There is no Xcode on Linux, so we
+      # pre-set SDKROOT to an absolute, existing, non-root path, which makes
+      # apple_sdk_root_inner() (cc-rs) return early without ever calling xcrun.
+      # No C is actually compiled for the apple targets, so this is only used
+      # for that early-exit.
+      SDKROOT: /usr
+
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
@@ -22,6 +32,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          # llvm.download-ci-llvm resolves its artifact sha from HEAD^1 and
+          # needs to walk history to find the upstream bors commit (see the
+          # "single commit" step below), so the full history is required.
+          fetch-depth: 0
 
       - name: Install dependencies
         run: |
@@ -36,6 +50,32 @@ jobs:
             libssl-dev \
             pkg-config
 
+      - name: Put all local changes into a single commit on top of upstream
+        # `llvm.download-ci-llvm = true` builds its download URL from `HEAD^1`
+        # (src/build_helper/src/git.rs get_closest_upstream_commit, CI branch).
+        # HEAD^1 must therefore be a real rust-lang/rust commit that has a
+        # `rust-dev-*` CI artifact, otherwise the download 404s. Collapsing all
+        # local work into one commit on top of the newest upstream bors commit
+        # guarantees that, without touching your pushed history (this is local
+        # to the runner).
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          UPSTREAM=$(git rev-list --first-parent -n1 --author=bors HEAD)
+          if [ -z "$UPSTREAM" ]; then
+            echo "::error::No upstream bors commit found in history. fetch-depth must be 0."
+            exit 1
+          fi
+          echo "Upstream commit: $UPSTREAM"
+          echo "                $(git log -1 --format=%s $UPSTREAM)"
+
+          git reset --soft "$UPSTREAM"
+          git commit --allow-empty -m "ci: iOS legacy toolchain build"
+
+          echo "HEAD   = $(git rev-parse HEAD)"
+          echo "HEAD^1 = $(git rev-parse HEAD^1)"
+
       - name: Set up Ninja execution environment
         run: |
           echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
@@ -46,11 +86,7 @@ jobs:
           change-id = "ignore"
 
           [llvm]
-          targets = "ARM;AArch64;X86"
-          experimental-targets = ""
-          link-shared = false
-          thin-lto = true
-          ninja = true
+          download-ci-llvm = true
 
           [build]
           build = "x86_64-unknown-linux-gnu"
@@ -67,6 +103,7 @@ jobs:
           ]
 
           description = "iOS-Legacy-Toolchain"
+          dist-stage = 1
           docs = false
           extended = true
           tools = ["cargo", "rustfmt"]
@@ -93,7 +130,11 @@ jobs:
       - name: Package Toolchain Artifacts
         run: |
           mkdir -p dist_output
-          cp -r build/dist/*.tar.gz dist_output/ || true
+          shopt -s nullglob
+          for f in build/dist/*.tar.gz build/dist/*.tar.xz build/dist/*.tar.zst; do
+            cp "$f" dist_output/
+          done
+          ls -la dist_output/
 
       - name: Upload Toolchain Artifact
         uses: actions/upload-artifact@v4
