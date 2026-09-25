@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
@@ -86,7 +88,7 @@ jobs:
         run: |
           CPU_CORES=$(nproc)
           echo "Building using ${CPU_CORES} threads..."
-          python3 x.py dist --jobs ${CPU_CORES}
+          python3 src/bootstrap/bootstrap.py dist --jobs ${CPU_CORES}
 
       - name: Package Toolchain Artifacts
         run: |
