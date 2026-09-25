@@ -127,11 +127,16 @@ jobs:
           test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
           grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
 
-          # theos dumped these tbd stubs from `nm` output and only kept
-          # *defined* (T) symbols -- Apple's mem* entry points are *indirect*
-          # symbols ("I _memmove (indirect for __platform_memmove)"), so they
-          # are missing and ld64 reports them undefined while linking std.
-          # Re-add them to exports[0] (archs covers every triple we build).
+          # theos dumped these tbd stubs from `nm` output and dropped two
+          # whole classes of symbols:
+          #   * indirect symbols (nm shows "I _bzero (indirect for
+          #     __platform_bzero)") -- all 14 of them are missing from
+          #     libsystem_c.tbd;
+          #   * most of libunwind's defined symbols (only 17 of 39 kept,
+          #     dropping __Unwind_RaiseException/Backtrace/Resume and the
+          #     whole _unw_* family).
+          # ld64 reports them undefined while linking std. Re-add them to
+          # exports[0] (archs covers every triple we build).
           python3 - <<'PY'
           import os, pathlib, re, yaml
 
@@ -148,10 +153,25 @@ jobs:
           L.add_multi_constructor('!', tagged)
 
           PATCH = {
-              'usr/lib/system/libsystem_c.tbd':
-                  ['_memmove', '_memset', '_memcmp', '_memcpy'],
-              'usr/lib/system/libsystem_platform.tbd':
-                  ['_memset_pattern16'],
+              'usr/lib/system/libsystem_c.tbd': [
+                  '_bcmp', '_bzero', '_memccpy', '_memchr', '_memcmp', '_memcpy',
+                  '_memmove', '_memset', '_memset_pattern16', '_memset_pattern4',
+                  '_memset_pattern8', '_strchr', '_strcmp', '_strncmp',
+              ],
+              'usr/lib/system/libunwind.tbd': [
+                  '__Unwind_Backtrace', '__Unwind_FindEnclosingFunction',
+                  '__Unwind_Find_FDE', '__Unwind_ForcedUnwind',
+                  '__Unwind_RaiseException', '__Unwind_Resume',
+                  '__Unwind_Resume_or_Rethrow', '___deregister_frame',
+                  '___register_frame', '_unw_get_fpreg', '_unw_get_proc_info',
+                  '_unw_get_proc_name', '_unw_get_reg', '_unw_init_local',
+                  '_unw_is_fpreg', '_unw_is_signal_frame',
+                  '_unw_iterate_dwarf_unwind_cache', '_unw_regname', '_unw_resume',
+                  '_unw_set_fpreg', '_unw_set_reg', '_unw_step',
+              ],
+              'usr/lib/system/libsystem_platform.tbd': [
+                  '_memset_pattern16',
+              ],
           }
           sdk = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'iPhoneOS10.3.sdk'
           for rel, syms in PATCH.items():
@@ -173,7 +193,7 @@ jobs:
               d2 = yaml.load(re.sub(r'^--- !\S+', '---', p.read_text(), flags=re.M), Loader=L)
               for s in add:
                   assert s in d2['exports'][0]['symbols'], f'{s} missing after patch'
-              print(f'{rel}: added {add} for archs={d["exports"][0]["archs"]}')
+              print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
           PY
 
           # iOS 16.5: tbd-v4 targets [ armv7-ios, armv7s-ios, arm64-ios,
