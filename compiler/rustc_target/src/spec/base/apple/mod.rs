@@ -338,6 +338,7 @@ impl OSVersion {
             (Os::IOs, _, _) if target.llvm_target.starts_with("arm64e") => (14, 0, 0),
             // Mac Catalyst defaults to 13.1 in Clang.
             (Os::IOs, _, Env::MacAbi) => (13, 1, 0),
+            (Os::IOs, crate::spec::Arch::Arm, Env::Unspecified) => (4, 0, 0),
             (Os::TvOs, crate::spec::Arch::AArch64, Env::Sim) => (14, 0, 0),
             (Os::WatchOs, crate::spec::Arch::AArch64, Env::Sim) => (7, 0, 0),
             // True Aarch64 on watchOS (instead of their Aarch64 Ilp32 called `arm64_32`) has been
