@@ -230,7 +230,7 @@ impl __timespec64 {
     }
 }
 
-#[cfg(all(target_vendor = "apple", target_os = "ios", target_arch = "arm"))]
+#[cfg(target_os = "ios")]
 #[allow(dead_code)]
 mod legacy_ios_shim {
     #![allow(dead_code)]
