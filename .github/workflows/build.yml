@@ -8,14 +8,12 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # cc-rs runs `xcrun --show-sdk-path` for every apple target while bootstrap
-      # probes a C compiler for each entry in build.target
-      # (src/bootstrap/src/utils/cc_detect.rs). There is no Xcode on Linux, so we
-      # pre-set SDKROOT to an absolute, existing, non-root path, which makes
-      # apple_sdk_root_inner() (cc-rs) return early without ever calling xcrun.
-      # No C is actually compiled for the apple targets, so this is only used
-      # for that early-exit.
-      SDKROOT: /usr
+      # The prebuilt Darwin-flavored clang (iOSToolchain tarball) uses this
+      # as its sysroot. It only has to exist by the time `x dist` runs -- the
+      # job creates it below. (A plain `/usr` here used to make cc-rs skip
+      # `xcrun`, but a real SDK gives us that for free: cc-rs returns early on
+      # any existing, non-root path.)
+      SDKROOT: ${{ github.workspace }}/iPhoneOS10.3.sdk
       # sanity.rs checks every build.target against `stage0 --print target-list`.
       # The stage0 beta does not know the locally re-added `armv7-apple-ios`
       # target, so skip that check (stage 1 std is built by our own stage1
@@ -105,6 +103,39 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
+      - name: Install iOS toolchain and SDK
+        run: |
+          # Linux GNU ld cannot produce Mach-O at all (it dies on Darwin link
+          # args). Use the prebuilt Darwin-flavored clang/ld64 instead -- the
+          # same tarball theos' own installer fetches, minus theos itself.
+          mkdir -p "$GITHUB_WORKSPACE/.toolchain"
+          curl -sL "https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$(uname -m).tar.xz" \
+            | tar -xJvf - -C "$GITHUB_WORKSPACE/.toolchain/"
+          CLANG="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/clang"
+          test -x "$CLANG"
+          ls "$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          "$CLANG" --version
+
+          # theos' iPhoneOS10.3 SDK is pure tbd stubs (1026 .tbd, 0 .dylib),
+          # so there are no binary slices to be missing: libSystem.tbd lists
+          # archs [ armv7, armv7s, arm64, i386, x86_64 ], covering the
+          # simulator triples too. It does not list arm64e, so arm64e links
+          # against 16.5 instead (see the rustflags below).
+          curl -sL -o "$RUNNER_TEMP/ios-sdk.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS10.3.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
+          grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
+
+          # iOS 16.5: tbd-v4 targets [ armv7-ios, armv7s-ios, arm64-ios,
+          # arm64e-ios ] -- the only source of arm64e stubs. No simulator
+          # archs, hence the split.
+          curl -sL -o "$RUNNER_TEMP/ios-sdk-165.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk-165.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS16.5.sdk/usr"
+          grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS16.5.sdk/usr/lib/libSystem.tbd"
+
       - name: Put all local changes into a single commit on top of upstream
         # `llvm.download-ci-llvm = true` builds its download URL from `HEAD^1`
         # (src/build_helper/src/git.rs get_closest_upstream_commit, CI branch).
@@ -173,6 +204,29 @@ jobs:
 
           [dist]
           src-tarball = false
+
+          # Link the Apple targets with the Darwin-flavored clang instead of
+          # whatever `cc` bootstrap finds (GNU ld cannot emit Mach-O). The
+          # host target keeps the default linker. `${{ ... }}` is expanded by
+          # Actions before this heredoc ever reaches the shell.
+          [target.armv7-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.armv7s-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.aarch64-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.arm64e-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+          rustflags = ["-C", "link-arg=-isysroot", "-C", "link-arg=${{ github.workspace }}/iPhoneOS16.5.sdk"]
+
+          [target.i386-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.x86_64-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
           EOF
 
       - name: Build Rust Toolchain
