@@ -1,0 +1,207 @@
+name: Build iOS LLVM
+
+on:
+  workflow_dispatch:
+
+env:
+  SDKROOT: ${{ github.workspace }}/iPhoneOS10.3.sdk
+  IPHONEOS_DEPLOYMENT_TARGET: '4.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          root-reserve-mb: 40960
+
+      - name: Checkout llvm-project
+        uses: actions/checkout@v4
+        with:
+          repository: rust-lang/llvm-project
+          ref: 1b9c0d5ff9bbe7634aead059efe6b11a7eeba145
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build cmake git python3 curl
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Install iOS toolchain and SDK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.toolchain"
+          curl -sL "https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$(uname -m).tar.xz" \
+            | tar -xJvf - -C "$GITHUB_WORKSPACE/.toolchain/"
+          CLANG="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/clang"
+          test -x "$CLANG"
+          "$CLANG" --version
+          curl -sL -o "$RUNNER_TEMP/ios-sdk.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS10.3.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
+          grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
+
+      - name: Patch SDK tbd stubs
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, yaml
+
+          class L(yaml.SafeLoader):
+              pass
+
+          def tagged(loader, suffix, node):
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              return loader.construct_scalar(node)
+
+          L.add_multi_constructor('!', tagged)
+
+          PATCH = {
+              'usr/lib/system/libsystem_c.tbd': [
+                  '_bcmp', '_bzero', '_memccpy', '_memchr', '_memcmp', '_memcpy',
+                  '_memmove', '_memset', '_memset_pattern16', '_memset_pattern4',
+                  '_memset_pattern8', '_strchr', '_strcmp', '_strncmp',
+              ],
+              'usr/lib/system/libunwind.tbd': [
+                  '__Unwind_Backtrace', '__Unwind_FindEnclosingFunction',
+                  '__Unwind_Find_FDE', '__Unwind_ForcedUnwind',
+                  '__Unwind_RaiseException', '__Unwind_Resume',
+                  '__Unwind_Resume_or_Rethrow', '___deregister_frame',
+                  '___register_frame', '_unw_get_fpreg', '_unw_get_proc_info',
+                  '_unw_get_proc_name', '_unw_get_reg', '_unw_init_local',
+                  '_unw_is_fpreg', '_unw_is_signal_frame',
+                  '_unw_iterate_dwarf_unwind_cache', '_unw_regname', '_unw_resume',
+                  '_unw_set_fpreg', '_unw_set_reg', '_unw_step',
+              ],
+              'usr/lib/system/libsystem_platform.tbd': [
+                  '_memset_pattern16',
+              ],
+          }
+          sdk = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'iPhoneOS10.3.sdk'
+          for rel, syms in PATCH.items():
+              p = sdk / rel
+              t = p.read_text()
+              d = yaml.load(re.sub(r'^--- !\S+', '---', t, flags=re.M), Loader=L)
+              have = set()
+              for e in d['exports']:
+                  for v in e.values():
+                      if isinstance(v, list):
+                          have |= set(v)
+              add = [s for s in syms if s not in have]
+              if not add:
+                  print(f'{rel}: already present')
+                  continue
+              i = t.index('symbols:')
+              j = t.index('[', i)
+              p.write_text(t[:j + 1] + ' ' + ', '.join(add) + ',' + t[j + 1:])
+              d2 = yaml.load(re.sub(r'^--- !\S+', '---', p.read_text(), flags=re.M), Loader=L)
+              for s in add:
+                  assert s in d2['exports'][0]['symbols'], f'{s} missing after patch'
+              print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
+          PY
+
+      - name: Set up Ninja environment
+        run: echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
+
+      - name: Build native llvm-tblgen
+        run: |
+          cmake -G Ninja -S llvm -B build-native \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD= \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_BUILD_UTILS=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF
+          ninja -C build-native llvm-tblgen
+          test -x build-native/bin/llvm-tblgen
+          df -h /
+
+      - name: Configure LLVM for armv7-apple-ios
+        run: |
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          SDK="$GITHUB_WORKSPACE/iPhoneOS10.3.sdk"
+          cat > "$RUNNER_TEMP/ios-armv7.cmake" <<EOF
+          set(CMAKE_SYSTEM_NAME Darwin)
+          set(CMAKE_SYSTEM_PROCESSOR arm)
+          set(CMAKE_OSX_SYSROOT "$SDK")
+          set(CMAKE_OSX_ARCHITECTURES armv7)
+          set(CMAKE_OSX_DEPLOYMENT_TARGET 4.0)
+          set(CMAKE_C_COMPILER "$TB/clang")
+          set(CMAKE_CXX_COMPILER "$TB/clang++")
+          set(CMAKE_AR "$TB/llvm-ar")
+          set(CMAKE_RANLIB "$TB/llvm-ranlib")
+          set(CMAKE_FIND_ROOT_PATH "$SDK")
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          EOF
+          AR="$TB/llvm-ar"
+          test -x "$AR" || AR="$TB/ar"
+          RN="$TB/llvm-ranlib"
+          test -x "$RN" || RN="$TB/ranlib"
+          cmake -G Ninja -S llvm -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/ios-armv7.cmake" \
+            -DCMAKE_AR="$AR" \
+            -DCMAKE_RANLIB="$RN" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/llvm-ios" \
+            -DLLVM_NATIVE_TOOL_DIR="$GITHUB_WORKSPACE/build-native/bin" \
+            -DLLVM_TARGETS_TO_BUILD="ARM;X86" \
+            -DLLVM_BUILD_LLVM_DYLIB=ON \
+            -DLLVM_BUILD_LLVM_DYLIB_ONLY=ON \
+            -DLLVM_LINK_LLVM_DYLIB=ON \
+            -DLLVM_DEFAULT_TARGET_TRIPLE=armv7-apple-ios \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_BUILD_UTILS=OFF \
+            -DLLVM_INSTALL_UTILS=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_OCAMLDOC=OFF \
+            -DLLVM_OPTIMIZED_TABLEGEN=ON
+
+      - name: Build LLVM
+        run: ninja -C build
+
+      - name: Install LLVM
+        run: |
+          ninja -C build install
+          find "$GITHUB_WORKSPACE/llvm-ios" -name 'libLLVM*' -exec ls -la {} \;
+          file "$GITHUB_WORKSPACE/llvm-ios/lib/libLLVM"*.dylib 2>/dev/null | head -3
+          "$GITHUB_WORKSPACE/llvm-ios/bin/llvm-config" --version 2>/dev/null || true
+
+      - name: Package
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          tar -cJf llvm-ios-armv7.tar.xz -C llvm-ios .
+          ls -la llvm-ios-armv7.tar.xz
+          df -h /
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-ios-armv7
+          path: llvm-ios-armv7.tar.xz
+          if-no-files-found: error
