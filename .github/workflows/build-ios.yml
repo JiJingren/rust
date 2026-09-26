@@ -36,7 +36,8 @@ jobs:
             || sudo apt-get install -y --no-install-recommends ninja-build clang libc++-dev
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
-          (command -v clang-19 || command -v clang) --version | head -1
+          CC=$(command -v clang-19 || command -v clang)
+          "$CC" --version | head -1
           df -h /
 
       - name: Install iOS toolchain and SDK
