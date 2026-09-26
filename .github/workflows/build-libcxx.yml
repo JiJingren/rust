@@ -68,9 +68,7 @@ jobs:
           SDK="$GITHUB_WORKSPACE/iPhoneOS10.3.sdk"
           CLANG=$(command -v clang-19 || command -v clang)
           CLANGXX=$(command -v clang++-19 || command -v clang++)
-          V1=$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)
           test -x "$CLANG" && test -x "$CLANGXX"
-          test -d "$V1"
           echo 'set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")' > "$RUNNER_TEMP/fix-rpath.cmake"
           cat > "$RUNNER_TEMP/ios-armv7.cmake" <<EOF
           set(CMAKE_SYSTEM_NAME Darwin)
@@ -83,7 +81,7 @@ jobs:
           set(CMAKE_AR "$TB/llvm-ar")
           set(CMAKE_RANLIB "$TB/llvm-ranlib")
           set(CMAKE_C_FLAGS_INIT "-target armv7-apple-ios -B$TB")
-          set(CMAKE_CXX_FLAGS_INIT "-target armv7-apple-ios -B$TB -include machine/_types.h -nostdinc++ -isystem $V1 -stdlib=libc++")
+          set(CMAKE_CXX_FLAGS_INIT "-target armv7-apple-ios -B$TB -include machine/_types.h -nostdinc++")
           set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
           set(CMAKE_FIND_ROOT_PATH "$SDK")
           set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
