@@ -1,0 +1,250 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      SDKROOT: ${{ github.workspace }}/iPhoneOS10.3.sdk
+      BOOTSTRAP_SKIP_TARGET_SANITY: "1"
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      TMPDIR: ${{ github.workspace }}/.tmp
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          root-reserve-mb: 40960
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Prepare workspace dirs
+        run: |
+          mkdir -p "$CARGO_HOME" "$TMPDIR"
+          echo "=== disk after checkout ==="
+          df -h
+
+      - name: Init the only submodules we need
+        run: |
+          git submodule sync
+          for p in library/backtrace src/tools/cargo src/llvm-project; do
+            git submodule update --init --depth 1 "$p" \
+              || git submodule update --init --force "$p" \
+              || true
+          done
+          git submodule status
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ninja-build \
+            cmake \
+            git \
+            python3 \
+            curl \
+            libssl-dev \
+            pkg-config
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Install iOS toolchain and SDK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.toolchain"
+          curl -sL "https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$(uname -m).tar.xz" \
+            | tar -xJvf - -C "$GITHUB_WORKSPACE/.toolchain/"
+          CLANG="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/clang"
+          test -x "$CLANG"
+          ls "$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          "$CLANG" --version
+
+          curl -sL -o "$RUNNER_TEMP/ios-sdk.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS10.3.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
+          grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
+
+          python3 - <<'PY'
+          import os, pathlib, re, yaml
+
+          class L(yaml.SafeLoader):
+              pass
+
+          def tagged(loader, suffix, node):
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              return loader.construct_scalar(node)
+
+          L.add_multi_constructor('!', tagged)
+
+          PATCH = {
+              'usr/lib/system/libsystem_c.tbd': [
+                  '_bcmp', '_bzero', '_memccpy', '_memchr', '_memcmp', '_memcpy',
+                  '_memmove', '_memset', '_memset_pattern16', '_memset_pattern4',
+                  '_memset_pattern8', '_strchr', '_strcmp', '_strncmp',
+              ],
+              'usr/lib/system/libunwind.tbd': [
+                  '__Unwind_Backtrace', '__Unwind_FindEnclosingFunction',
+                  '__Unwind_Find_FDE', '__Unwind_ForcedUnwind',
+                  '__Unwind_RaiseException', '__Unwind_Resume',
+                  '__Unwind_Resume_or_Rethrow', '___deregister_frame',
+                  '___register_frame', '_unw_get_fpreg', '_unw_get_proc_info',
+                  '_unw_get_proc_name', '_unw_get_reg', '_unw_init_local',
+                  '_unw_is_fpreg', '_unw_is_signal_frame',
+                  '_unw_iterate_dwarf_unwind_cache', '_unw_regname', '_unw_resume',
+                  '_unw_set_fpreg', '_unw_set_reg', '_unw_step',
+              ],
+              'usr/lib/system/libsystem_platform.tbd': [
+                  '_memset_pattern16',
+              ],
+          }
+          sdk = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'iPhoneOS10.3.sdk'
+          for rel, syms in PATCH.items():
+              p = sdk / rel
+              t = p.read_text()
+              d = yaml.load(re.sub(r'^--- !\S+', '---', t, flags=re.M), Loader=L)
+              have = set()
+              for e in d['exports']:
+                  for v in e.values():
+                      if isinstance(v, list):
+                          have |= set(v)
+              add = [s for s in syms if s not in have]
+              if not add:
+                  print(f'{rel}: already present')
+                  continue
+              i = t.index('symbols:')
+              j = t.index('[', i)
+              p.write_text(t[:j + 1] + ' ' + ', '.join(add) + ',' + t[j + 1:])
+              d2 = yaml.load(re.sub(r'^--- !\S+', '---', p.read_text(), flags=re.M), Loader=L)
+              for s in add:
+                  assert s in d2['exports'][0]['symbols'], f'{s} missing after patch'
+              print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
+          PY
+
+          curl -sL -o "$RUNNER_TEMP/ios-sdk-165.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk-165.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS16.5.sdk/usr"
+          grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS16.5.sdk/usr/lib/libSystem.tbd"
+
+      - name: Put all local changes into a single commit on top of upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          UPSTREAM=$(git rev-list --first-parent -n1 --author=bors HEAD)
+          if [ -z "$UPSTREAM" ]; then
+            echo "::error::No upstream bors commit found in history. fetch-depth must be 0."
+            exit 1
+          fi
+          echo "Upstream commit: $UPSTREAM"
+          echo "                $(git log -1 --format=%s $UPSTREAM)"
+
+          git reset --soft "$UPSTREAM"
+          git commit --allow-empty -m "ci: iOS legacy toolchain build"
+
+          echo "HEAD   = $(git rev-parse HEAD)"
+          echo "HEAD^1 = $(git rev-parse HEAD^1)"
+
+      - name: Set up Ninja execution environment
+        run: |
+          echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
+
+      - name: Generate bootstrap config.toml
+        run: |
+          cat << 'EOF' > config.toml
+          change-id = "ignore"
+
+          [llvm]
+          download-ci-llvm = true
+
+          [build]
+          build = "x86_64-unknown-linux-gnu"
+          host = ["x86_64-unknown-linux-gnu"]
+
+          target = [
+            "x86_64-unknown-linux-gnu",
+            "armv7-apple-ios",
+            "armv7s-apple-ios",
+            "aarch64-apple-ios",
+            "arm64e-apple-ios",
+            "i386-apple-ios",
+            "x86_64-apple-ios"
+          ]
+
+          description = "iOS-Legacy-Toolchain"
+          docs = false
+          extended = true
+          tools = ["cargo", "rustfmt"]
+          python = "python3"
+
+          [rust]
+          codegen-units = 0
+          debug = false
+          debug-assertions = false
+          overflow-checks = false
+          channel = "nightly"
+          rpath = true
+
+          [dist]
+          src-tarball = false
+
+          [target.armv7-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.armv7s-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.aarch64-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.arm64e-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+          rustflags = ["-C", "link-arg=-isysroot", "-C", "link-arg=${{ github.workspace }}/iPhoneOS16.5.sdk"]
+
+          [target.i386-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+
+          [target.x86_64-apple-ios]
+          linker = "${{ github.workspace }}/.toolchain/linux/iphone/bin/clang"
+          EOF
+
+      - name: Build Rust Toolchain
+        run: |
+          trap 'echo "::group::Disk usage at exit"; df -h; sudo du -xh --max-depth=1 / 2>/dev/null | sort -rh | head -20; echo "::endgroup::"' EXIT
+          CPU_CORES=$(nproc)
+          echo "Building using ${CPU_CORES} threads..."
+          echo "=== disk before build ==="
+          df -h
+          python3 src/bootstrap/bootstrap.py dist --stage 2 --jobs ${CPU_CORES}
+
+      - name: Package Toolchain Artifacts
+        run: |
+          mkdir -p dist_output
+          shopt -s nullglob
+          for f in build/dist/*.tar.gz build/dist/*.tar.xz build/dist/*.tar.zst; do
+            cp "$f" dist_output/
+          done
+          ls -la dist_output/
+
+      - name: Upload Toolchain Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ios-linux-x86_64
+          path: dist_output/
+          retention-days: 7
