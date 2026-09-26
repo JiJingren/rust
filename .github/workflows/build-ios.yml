@@ -132,7 +132,7 @@ jobs:
         run: |
           V1=$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)
           test -d "$V1"
-          V1="$V1" python3 - <<'PY'
+          sudo env V1="$V1" python3 - <<'PY'
           import os, pathlib
           p = pathlib.Path(os.environ['V1']) / '__configuration/availability.h'
           t = p.read_text()
