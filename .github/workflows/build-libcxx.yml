@@ -21,12 +21,20 @@ jobs:
           remove-docker-images: 'true'
           root-reserve-mb: 40960
 
-      - name: Checkout llvm-project
-        uses: actions/checkout@v4
-        with:
-          repository: rust-lang/llvm-project
-          ref: 1b9c0d5ff9bbe7634aead059efe6b11a7eeba145
-          fetch-depth: 1
+      - name: Fetch llvm-project 19.1.7 source
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/llvm19"
+          curl -sL "https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-19.1.7.tar.gz" \
+            | tar -xz -C "$GITHUB_WORKSPACE/llvm19" --strip-components=1 \
+              llvm-project-llvmorg-19.1.7/libcxx \
+              llvm-project-llvmorg-19.1.7/libcxxabi \
+              llvm-project-llvmorg-19.1.7/runtimes \
+              llvm-project-llvmorg-19.1.7/llvm/cmake \
+              llvm-project-llvmorg-19.1.7/clang/cmake \
+              llvm-project-llvmorg-19.1.7/cmake
+          test -d "$GITHUB_WORKSPACE/llvm19/libcxx/include"
+          test -d "$GITHUB_WORKSPACE/llvm19/libcxxabi/src"
+          test -f "$GITHUB_WORKSPACE/llvm19/runtimes/CMakeLists.txt"
 
       - name: Install dependencies
         run: |
@@ -83,7 +91,7 @@ jobs:
           set(CMAKE_EXE_LINKER_FLAGS_INIT "-L$SDK/usr/lib/system -lunwind")
           set(CMAKE_SHARED_LINKER_FLAGS_INIT "-L$SDK/usr/lib/system -lunwind")
           EOF
-          cmake -G Ninja -S runtimes -B build-libcxx \
+          cmake -G Ninja -S "$GITHUB_WORKSPACE/llvm19/runtimes" -B build-libcxx \
             -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/ios-armv7.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/llvm-ios" \
@@ -107,14 +115,9 @@ jobs:
           ninja -C build-libcxx
           ninja -C build-libcxx install
           OT="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/otool"
-          for f in "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib \
-                   "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib; do
-            if [ -f "$f" ]; then
-              echo "== $f"
-              "$OT" -L "$f" | head -3
-            fi
-          done
           NM="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/llvm-nm"
+          "$OT" -D "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib
+          "$OT" -D "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib
           "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib | grep -E "__Znwm$" && echo "abi exports operator new: OK"
           "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib | grep -E "__ZNSt3__119__shared_mutex_base4lockEv$" && echo "cxx exports shared_mutex: OK"
 
