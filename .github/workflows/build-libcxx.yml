@@ -107,7 +107,11 @@ jobs:
             -DLIBCXX_INCLUDE_DOCS=OFF \
             -DLIBCXXABI_INCLUDE_TESTS=OFF \
             -DLIBCXXABI_INCLUDE_DOCS=OFF \
-            -DLIBCXX_CXX_ABI=libcxxabi
+            -DLIBCXX_CXX_ABI=libcxxabi \
+            -DLIBCXXABI_HAS_GCC_LIB=FALSE \
+            -DLIBCXXABI_HAS_GCC_S_LIB=FALSE \
+            -DLIBCXX_HAS_GCC_LIB=FALSE \
+            -DLIBCXX_HAS_GCC_S_LIB=FALSE
 
       - name: Build and install libc++ runtimes
         run: |
@@ -115,8 +119,9 @@ jobs:
           ninja -C build-libcxx install
           OT="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/otool"
           NM="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/llvm-nm"
-          "$OT" -D "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib
-          "$OT" -D "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib
+          ls -la "$GITHUB_WORKSPACE"/llvm-ios/lib/
+          "$OT" -D "$GITHUB_WORKSPACE"/llvm-ios/lib/*.dylib || true
+          "$OT" -L "$GITHUB_WORKSPACE"/llvm-ios/lib/*.dylib || true
           "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib | grep -E "__Znwm$" && echo "abi exports operator new: OK"
           "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib | grep -E "__ZNSt3__119__shared_mutex_base4lockEv$" && echo "cxx exports shared_mutex: OK"
 
