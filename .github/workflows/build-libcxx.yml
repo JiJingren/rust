@@ -30,6 +30,7 @@ jobs:
               llvm-project-llvmorg-19.1.7/libcxxabi \
               llvm-project-llvmorg-19.1.7/runtimes \
               llvm-project-llvmorg-19.1.7/llvm/cmake \
+              llvm-project-llvmorg-19.1.7/llvm/utils \
               llvm-project-llvmorg-19.1.7/clang/cmake \
               llvm-project-llvmorg-19.1.7/cmake
           test -d "$GITHUB_WORKSPACE/llvm19/libcxx/include"
