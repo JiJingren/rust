@@ -126,6 +126,13 @@ jobs:
           t = t.replace(old1, 'MinAlign <= 8,')
           p.write_text(t)
           print('patched', p)
+          p2 = pathlib.Path('llvm/lib/Support/CMakeLists.txt')
+          t2 = p2.read_text()
+          old2 = 'set(system_libs ${system_libs} rt)'
+          assert old2 in t2, 'rt link site not found'
+          t2 = t2.replace(old2, 'set(system_libs ${system_libs})')
+          p2.write_text(t2)
+          print('patched', p2)
           PY
 
       - name: Set up Ninja environment
