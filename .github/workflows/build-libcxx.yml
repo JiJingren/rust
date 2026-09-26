@@ -183,8 +183,13 @@ jobs:
           ninja -C build-libcxx
           ninja -C build-libcxx install
           OT="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/otool"
+          OTN="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/install_name_tool"
           NM="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/llvm-nm"
-          ls -la "$GITHUB_WORKSPACE"/llvm-ios/lib/
+          LIB="$GITHUB_WORKSPACE/llvm-ios/lib"
+          "$OTN" -id /usr/lib/libc++.1.dylib "$LIB/libc++.1.0.dylib"
+          "$OTN" -change @rpath/libc++abi.1.dylib /usr/lib/libc++abi.dylib "$LIB/libc++.1.0.dylib"
+          "$OTN" -id /usr/lib/libc++abi.dylib "$LIB/libc++abi.1.0.dylib"
+          ls -la "$LIB"/
           "$OT" -D "$GITHUB_WORKSPACE"/llvm-ios/lib/*.dylib || true
           "$OT" -L "$GITHUB_WORKSPACE"/llvm-ios/lib/*.dylib || true
           "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib | grep -E "__Znwm$" && echo "abi exports operator new: OK"
@@ -193,10 +198,9 @@ jobs:
       - name: Package
         run: |
           cd "$GITHUB_WORKSPACE"
-          tar -cJf libcxx-ios-armv7.tar.xz \
-            llvm-ios/lib/libc++.1.dylib \
-            llvm-ios/lib/libc++abi.dylib
+          tar -cJf libcxx-ios-armv7.tar.xz llvm-ios/lib/libc++*.dylib*
           ls -la libcxx-ios-armv7.tar.xz
+          tar -tJf libcxx-ios-armv7.tar.xz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
