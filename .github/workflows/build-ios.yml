@@ -114,6 +114,27 @@ jobs:
               print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
           PY
 
+      - name: Patch LLVM for armv7
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('llvm/include/llvm/Support/Allocator.h')
+          t = p.read_text()
+          old1 = 'MinAlign <= alignof(std::max_align_t),'
+          assert old1 in t, 'static_assert site not found'
+          t = t.replace(old1, 'MinAlign <= 8,')
+          old2 = 'using AllocTy = detail::AllocatorHolder<AllocatorT>;'
+          assert old2 in t, 'AllocTy site not found'
+          ins = (old2 +
+                 '\n  using AllocatorBase<BumpPtrAllocatorImpl<AllocatorT, SlabSize,'
+                 ' SizeThreshold, GrowthDelay, MinAlign>>::Allocate;'
+                 '\n  using AllocatorBase<BumpPtrAllocatorImpl<AllocatorT, SlabSize,'
+                 ' SizeThreshold, GrowthDelay, MinAlign>>::Deallocate;')
+          t = t.replace(old2, ins)
+          p.write_text(t)
+          print('patched', p)
+          PY
+
       - name: Set up Ninja environment
         run: echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
 
