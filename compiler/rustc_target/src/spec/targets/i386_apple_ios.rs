@@ -4,7 +4,9 @@ use crate::spec::{Os, Target, TargetMetadata, TargetOptions};
 pub(crate) fn target() -> Target {
     // i386-apple-ios is a simulator target, even though it isn't declared
     // that way in the target name like the other ones...
-    let (opts, llvm_target, arch) = base(Os::IOs, Arch::I386, TargetEnv::Simulator);
+    let (mut opts, llvm_target, arch) = base(Os::IOs, Arch::I386, TargetEnv::Simulator);
+
+    opts.has_thread_local = false;
     Target {
         llvm_target,
         metadata: TargetMetadata {

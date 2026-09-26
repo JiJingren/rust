@@ -14,6 +14,7 @@ mod tests;
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, PartialEq)]
 pub(crate) enum Arch {
+    Armv7,
     Armv7k,
     Armv7s,
     Arm64,
@@ -28,6 +29,7 @@ pub(crate) enum Arch {
 impl Arch {
     fn target_name(self) -> &'static str {
         match self {
+            Self::Armv7 => "armv7",
             Self::Armv7k => "armv7k",
             Self::Armv7s => "armv7s",
             Self::Arm64 => "arm64",
@@ -42,7 +44,7 @@ impl Arch {
 
     pub(crate) fn target_arch(self) -> crate::spec::Arch {
         match self {
-            Self::Armv7k | Self::Armv7s => crate::spec::Arch::Arm,
+            Self::Armv7 | Self::Armv7k | Self::Armv7s => crate::spec::Arch::Arm,
             Self::Arm64 | Self::Arm64e | Self::Arm64_32 => crate::spec::Arch::AArch64,
             Self::I386 | Self::I686 => crate::spec::Arch::X86,
             Self::X86_64 | Self::X86_64h => crate::spec::Arch::X86_64,
@@ -51,6 +53,7 @@ impl Arch {
 
     fn target_cpu(self, env: TargetEnv) -> &'static str {
         match self {
+            Self::Armv7 => "cortex-a8",
             Self::Armv7k => "cortex-a8",
             Self::Armv7s => "swift", // iOS 10 is only supported on iPhone 5 or higher.
             Self::Arm64 => match env {
@@ -74,7 +77,7 @@ impl Arch {
 
     fn stack_probes(self) -> StackProbeType {
         match self {
-            Self::Armv7k | Self::Armv7s => StackProbeType::None,
+            Self::Armv7 | Self::Armv7k | Self::Armv7s => StackProbeType::None,
             Self::Arm64
             | Self::Arm64e
             | Self::Arm64_32
@@ -152,7 +155,7 @@ pub(crate) fn base(
         default_dwarf_version: 4,
         frame_pointer: match arch {
             // clang ignores `-fomit-frame-pointer` for Armv7, it only accepts `-momit-leaf-frame-pointer`
-            Arch::Armv7k | Arch::Armv7s => FramePointer::Always,
+            Arch::Armv7 | Arch::Armv7k | Arch::Armv7s => FramePointer::Always,
             // clang supports omitting frame pointers for the rest, but... don't?
             Arch::Arm64 | Arch::Arm64e | Arch::Arm64_32 => FramePointer::NonLeaf,
             Arch::I386 | Arch::I686 | Arch::X86_64 | Arch::X86_64h => FramePointer::Always,
@@ -335,6 +338,10 @@ impl OSVersion {
             (Os::IOs, _, _) if target.llvm_target.starts_with("arm64e") => (14, 0, 0),
             // Mac Catalyst defaults to 13.1 in Clang.
             (Os::IOs, _, Env::MacAbi) => (13, 1, 0),
+            (Os::IOs, crate::spec::Arch::AArch64, Env::Unspecified) => (7, 0, 0),
+            (Os::IOs, crate::spec::Arch::X86_64, Env::Sim) => (7, 0, 0),
+            (Os::IOs, crate::spec::Arch::X86, Env::Sim) => (4, 0, 0),
+            (Os::IOs, crate::spec::Arch::Arm, Env::Unspecified) => (4, 0, 0),
             (Os::TvOs, crate::spec::Arch::AArch64, Env::Sim) => (14, 0, 0),
             (Os::WatchOs, crate::spec::Arch::AArch64, Env::Sim) => (7, 0, 0),
             // True Aarch64 on watchOS (instead of their Aarch64 Ilp32 called `arm64_32`) has been
