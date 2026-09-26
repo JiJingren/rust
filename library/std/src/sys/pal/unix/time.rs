@@ -229,3 +229,97 @@ impl __timespec64 {
         Self { tv_sec, tv_nsec, _padding: 0 }
     }
 }
+
+#[cfg(target_os = "ios")]
+#[allow(dead_code)]
+mod legacy_ios_shim {
+    #![allow(dead_code)]
+
+    const CLOCK_REALTIME: libc::clockid_t = 0;
+    const CLOCK_MONOTONIC_RAW: libc::clockid_t = 4;
+    const CLOCK_MONOTONIC_RAW_APPROX: libc::clockid_t = 5;
+    const CLOCK_MONOTONIC: libc::clockid_t = 6;
+    const CLOCK_UPTIME_RAW: libc::clockid_t = 8;
+    const CLOCK_UPTIME_RAW_APPROX: libc::clockid_t = 9;
+
+    #[unsafe(no_mangle)]
+    extern "C" fn clock_gettime(
+        clock_id: libc::clockid_t,
+        tp: *mut libc::timespec,
+    ) -> libc::c_int {
+        if tp.is_null() {
+            return -1;
+        }
+
+        match clock_id {
+            CLOCK_REALTIME => {
+                let mut tv = core::mem::MaybeUninit::<libc::timeval>::uninit();
+                if unsafe { libc::gettimeofday(tv.as_mut_ptr(), core::ptr::null_mut()) } != 0 {
+                    return -1;
+                }
+                let tv = unsafe { tv.assume_init() };
+                unsafe {
+                    (*tp).tv_sec = tv.tv_sec;
+                    (*tp).tv_nsec = (tv.tv_usec as libc::c_long) * 1000;
+                }
+                0
+            }
+            CLOCK_MONOTONIC
+            | CLOCK_MONOTONIC_RAW
+            | CLOCK_MONOTONIC_RAW_APPROX
+            | CLOCK_UPTIME_RAW
+            | CLOCK_UPTIME_RAW_APPROX => {
+                #[repr(C)]
+                struct MachTimebaseInfo {
+                    numer: u32,
+                    denom: u32,
+                }
+
+                unsafe extern "C" {
+                    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+                    fn mach_absolute_time() -> u64;
+                }
+
+                let mut tb = MachTimebaseInfo { numer: 0, denom: 0 };
+                if unsafe { mach_timebase_info(&mut tb) } != 0 || tb.denom == 0 {
+                    return -1;
+                }
+
+                let ticks = u128::from(unsafe { mach_absolute_time() });
+                let ns = ticks * u128::from(tb.numer) / u128::from(tb.denom);
+                let sec = ns / 1_000_000_000;
+                let nsec = ns % 1_000_000_000;
+                unsafe {
+                    (*tp).tv_sec = sec as libc::time_t;
+                    (*tp).tv_nsec = nsec as libc::c_long;
+                }
+                0
+            }
+            _ => -1,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn clock_getres(
+        clock_id: libc::clockid_t,
+        res: *mut libc::timespec,
+    ) -> libc::c_int {
+        if res.is_null() {
+            return -1;
+        }
+
+        match clock_id {
+            CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_MONOTONIC_RAW
+            | CLOCK_MONOTONIC_RAW_APPROX
+            | CLOCK_UPTIME_RAW
+            | CLOCK_UPTIME_RAW_APPROX => unsafe {
+                (*res).tv_sec = 0;
+                (*res).tv_nsec = 1;
+                0
+            },
+            _ => -1,
+        }
+    }
+}
