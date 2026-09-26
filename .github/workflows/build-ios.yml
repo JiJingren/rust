@@ -194,6 +194,7 @@ jobs:
             -DLLVM_BUILD_LLVM_DYLIB_ONLY=ON \
             -DLLVM_LINK_LLVM_DYLIB=ON \
             -DLLVM_ENABLE_LIBCXX=ON \
+            -DLLVM_ENABLE_THREADS=OFF \
             -DLLVM_DEFAULT_TARGET_TRIPLE=armv7-apple-ios \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
