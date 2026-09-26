@@ -81,7 +81,7 @@ jobs:
           set(CMAKE_AR "$TB/llvm-ar")
           set(CMAKE_RANLIB "$TB/llvm-ranlib")
           set(CMAKE_C_FLAGS_INIT "-target armv7-apple-ios -B$TB")
-          set(CMAKE_CXX_FLAGS_INIT "-target armv7-apple-ios -B$TB -include machine/_types.h -nostdinc++")
+          set(CMAKE_CXX_FLAGS_INIT "-target armv7-apple-ios -B$TB -include machine/_types.h -nostdinc++ -D_LIBCPP_HAS_NO_C11_ALIGNED_ALLOC=")
           set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
           set(CMAKE_FIND_ROOT_PATH "$SDK")
           set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
