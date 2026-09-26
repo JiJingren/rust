@@ -80,13 +80,16 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
           set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          set(CMAKE_EXE_LINKER_FLAGS_INIT "-L$SDK/usr/lib/system -lunwind")
+          set(CMAKE_SHARED_LINKER_FLAGS_INIT "-L$SDK/usr/lib/system -lunwind")
           EOF
           cmake -G Ninja -S runtimes -B build-libcxx \
             -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/ios-armv7.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/llvm-ios" \
             -DCMAKE_INSTALL_NAME_DIR="/usr/lib" \
-            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi"
+            -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
             -DLIBCXX_ENABLE_SHARED=ON \
             -DLIBCXX_ENABLE_STATIC=OFF \
             -DLIBCXXABI_ENABLE_SHARED=ON \
@@ -97,8 +100,6 @@ jobs:
             -DLIBCXX_INCLUDE_DOCS=OFF \
             -DLIBCXXABI_INCLUDE_TESTS=OFF \
             -DLIBCXXABI_INCLUDE_DOCS=OFF \
-            -DLIBUNWIND_INCLUDE_TESTS=OFF \
-            -DLIBUNWIND_INCLUDE_DOCS=OFF \
             -DLIBCXX_CXX_ABI=libcxxabi
 
       - name: Build and install libc++ runtimes
@@ -107,8 +108,7 @@ jobs:
           ninja -C build-libcxx install
           OT="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/otool"
           for f in "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib \
-                   "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib \
-                   "$GITHUB_WORKSPACE"/llvm-ios/lib/libunwind.1.dylib; do
+                   "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib; do
             if [ -f "$f" ]; then
               echo "== $f"
               "$OT" -L "$f" | head -3
@@ -123,9 +123,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           tar -cJf libcxx-ios-armv7.tar.xz \
             llvm-ios/lib/libc++.1.dylib \
-            llvm-ios/lib/libc++abi.dylib \
-            llvm-ios/lib/libunwind.1.dylib \
-            $(ls llvm-ios/lib/libc++*.a llvm-ios/lib/libc++abi.a 2>/dev/null || true)
+            llvm-ios/lib/libc++abi.dylib
           ls -la libcxx-ios-armv7.tar.xz
 
       - name: Upload artifact
