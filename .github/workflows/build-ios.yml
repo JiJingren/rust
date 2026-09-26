@@ -115,6 +115,18 @@ jobs:
               print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
           PY
 
+          cat > "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/librt.tbd" <<'TBD'
+          archs:                 [ armv7 ]
+          platform:              ios
+          install-name:          /usr/lib/libSystem.B.dylib
+          current-version:       0
+          compatibility-version: 1
+          exports:
+            - archs:              [ armv7 ]
+              symbols:            [ ]
+          ...
+          TBD
+
       - name: Patch LLVM for armv7
         run: |
           python3 - <<'PY'
