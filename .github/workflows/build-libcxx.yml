@@ -59,6 +59,70 @@ jobs:
           tar -xJf "$RUNNER_TEMP/ios-sdk.tar.xz" -C "$GITHUB_WORKSPACE"
           test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
 
+      - name: Patch SDK tbd stubs
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, yaml
+
+          class L(yaml.SafeLoader):
+              pass
+
+          def tagged(loader, suffix, node):
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              return loader.construct_scalar(node)
+
+          L.add_multi_constructor('!', tagged)
+
+          PATCH = {
+              'usr/lib/system/libsystem_c.tbd': [
+                  '_bcmp', '_bzero', '_memccpy', '_memchr', '_memcmp', '_memcpy',
+                  '_memmove', '_memset', '_memset_pattern16', '_memset_pattern4',
+                  '_memset_pattern8', '_strchr', '_strcmp', '_strncmp',
+              ],
+              'usr/lib/system/libunwind.tbd': [
+                  '__Unwind_Backtrace', '__Unwind_FindEnclosingFunction',
+                  '__Unwind_Find_FDE', '__Unwind_ForcedUnwind',
+                  '__Unwind_RaiseException', '__Unwind_Resume',
+                  '__Unwind_Resume_or_Rethrow', '___deregister_frame',
+                  '___register_frame', '_unw_get_fpreg', '_unw_get_proc_info',
+                  '_unw_get_proc_name', '_unw_get_reg', '_unw_init_local',
+                  '_unw_is_fpreg', '_unw_is_signal_frame',
+                  '_unw_iterate_dwarf_unwind_cache', '_unw_regname', '_unw_resume',
+                  '_unw_set_fpreg', '_unw_set_reg', '_unw_step',
+              ],
+              'usr/lib/system/libsystem_platform.tbd': [
+                  '_memset_pattern16',
+              ],
+          }
+          sdk = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'iPhoneOS10.3.sdk'
+          for rel, syms in PATCH.items():
+              p = sdk / rel
+              t = p.read_text()
+              d = yaml.load(re.sub(r'^--- !\S+', '---', t, flags=re.M), Loader=L)
+              have = set()
+              for e in d['exports']:
+                  for v in e.values():
+                      if isinstance(v, list):
+                          have |= set(v)
+              add = [s for s in syms if s not in have]
+              if not add:
+                  print(f'{rel}: already present')
+                  continue
+              i = t.index('symbols:')
+              j = t.index('[', i)
+              p.write_text(t[:j + 1] + ' ' + ', '.join(add) + ',' + t[j + 1:])
+              d2 = yaml.load(re.sub(r'^--- !\S+', '---', p.read_text(), flags=re.M), Loader=L)
+              for s in add:
+                  assert s in d2['exports'][0]['symbols'], f'{s} missing after patch'
+              print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
+          PY
+
+          find "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk" -name '*.tbd' -exec sed -i 's/, i386, x86_64//g; s/\[ i386, x86_64, /[ /g; s/\[ i386, x86_64/[ /g' {} +
+          grep -m1 archs "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
+
       - name: Set up Ninja environment
         run: echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
 
@@ -111,7 +175,8 @@ jobs:
             -DLIBCXXABI_HAS_GCC_LIB=FALSE \
             -DLIBCXXABI_HAS_GCC_S_LIB=FALSE \
             -DLIBCXX_HAS_GCC_LIB=FALSE \
-            -DLIBCXX_HAS_GCC_S_LIB=FALSE
+            -DLIBCXX_HAS_GCC_S_LIB=FALSE \
+            -DCMAKE_OSX_ARCHITECTURES=armv7
 
       - name: Build and install libc++ runtimes
         run: |
