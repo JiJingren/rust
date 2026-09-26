@@ -116,6 +116,7 @@ jobs:
           PY
 
           cat > "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/librt.tbd" <<'TBD'
+          ---
           archs:                 [ armv7 ]
           platform:              ios
           install-name:          /usr/lib/libSystem.B.dylib
@@ -129,6 +130,19 @@ jobs:
 
       - name: Patch LLVM for armv7
         run: |
+          V1=$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)
+          test -d "$V1"
+          V1="$V1" python3 - <<'PY'
+          import os, pathlib
+          p = pathlib.Path(os.environ['V1']) / '__configuration/availability.h'
+          t = p.read_text()
+          old = ('#if !defined(_LIBCPP_COMPILER_GCC) && !defined(_WIN32)\n'
+                 '#  define _LIBCPP_AVAILABILITY_HAS_ADDITIONAL_IOSTREAM_EXPLICIT_INSTANTIATIONS_1')
+          assert old in t, 'iostream instantiation guard not found'
+          new = '#if 0\n#  define _LIBCPP_AVAILABILITY_HAS_ADDITIONAL_IOSTREAM_EXPLICIT_INSTANTIATIONS_1'
+          p.write_text(t.replace(old, new, 1))
+          print('patched', p)
+          PY
           python3 - <<'PY'
           import pathlib
           p = pathlib.Path('llvm/include/llvm/Support/Allocator.h')
@@ -146,6 +160,30 @@ jobs:
           p2.write_text(t2)
           print('patched', p2)
           PY
+          cat > "$RUNNER_TEMP/libcpp_verbose_abort.cpp" <<'EOF'
+          #include <cstdarg>
+          #include <cstdio>
+          #include <cstdlib>
+          namespace std {
+          inline namespace __1 {
+          [[noreturn]] void __libcpp_verbose_abort(const char* __format, ...) {
+            va_list __ap;
+            va_start(__ap, __format);
+            vfprintf(stderr, __format, __ap);
+            va_end(__ap);
+            abort();
+          }
+          }
+          }
+          EOF
+          CLANGXX=$(command -v clang++-19 || command -v clang++)
+          V1=$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)
+          "$CLANGXX" -target armv7-apple-ios -isysroot "$SDKROOT" \
+            -include machine/_types.h -nostdinc++ -isystem "$V1" -stdlib=libc++ \
+            -c "$RUNNER_TEMP/libcpp_verbose_abort.cpp" -o "$RUNNER_TEMP/libcpp_verbose_abort.o"
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          "$TB/llvm-ar" rcs "$RUNNER_TEMP/libcpp_abort_stub.a" "$RUNNER_TEMP/libcpp_verbose_abort.o"
+          ls -la "$RUNNER_TEMP/libcpp_abort_stub.a"
 
       - name: Set up Ninja environment
         run: echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
@@ -191,6 +229,7 @@ jobs:
           set(CMAKE_RANLIB "$TB/llvm-ranlib")
           set(CMAKE_C_FLAGS_INIT "-target armv7-apple-ios -B$TB")
           set(CMAKE_CXX_FLAGS_INIT "-target armv7-apple-ios -B$TB -include machine/_types.h -nostdinc++ -isystem $V1 -stdlib=libc++")
+          set(CMAKE_CXX_STANDARD_LIBRARIES "-lc++abi $RUNNER_TEMP/libcpp_abort_stub.a")
           set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
           set(CMAKE_FIND_ROOT_PATH "$SDK")
           set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
