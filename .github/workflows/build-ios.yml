@@ -32,11 +32,11 @@ jobs:
         run: |
           df -h /
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build libc++-dev
-          command -v clang >/dev/null || sudo apt-get install -y --no-install-recommends clang
+          sudo apt-get install -y --no-install-recommends ninja-build clang-19 libc++-19-dev \
+            || sudo apt-get install -y --no-install-recommends ninja-build clang libc++-dev
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
-          clang --version | head -1
+          (command -v clang-19 || command -v clang) --version | head -1
           df -h /
 
       - name: Install iOS toolchain and SDK
@@ -123,14 +123,6 @@ jobs:
           old1 = 'MinAlign <= alignof(std::max_align_t),'
           assert old1 in t, 'static_assert site not found'
           t = t.replace(old1, 'MinAlign <= 8,')
-          old2 = 'using AllocTy = detail::AllocatorHolder<AllocatorT>;'
-          assert old2 in t, 'AllocTy site not found'
-          ins = (old2 +
-                 '\n  using AllocatorBase<BumpPtrAllocatorImpl<AllocatorT, SlabSize,'
-                 ' SizeThreshold, GrowthDelay, MinAlign>>::Allocate;'
-                 '\n  using AllocatorBase<BumpPtrAllocatorImpl<AllocatorT, SlabSize,'
-                 ' SizeThreshold, GrowthDelay, MinAlign>>::Deallocate;')
-          t = t.replace(old2, ins)
           p.write_text(t)
           print('patched', p)
           PY
@@ -161,9 +153,9 @@ jobs:
         run: |
           TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
           SDK="$GITHUB_WORKSPACE/iPhoneOS10.3.sdk"
-          CLANG=$(command -v clang)
-          CLANGXX=$(command -v clang++)
-          V1=$(ls -d /usr/include/c++/v1 /usr/lib/llvm-*/include/c++/v1 2>/dev/null | head -1)
+          CLANG=$(command -v clang-19 || command -v clang)
+          CLANGXX=$(command -v clang++-19 || command -v clang++)
+          V1=$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)
           test -x "$CLANG" && test -x "$CLANGXX"
           test -d "$V1"
           echo 'set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")' > "$RUNNER_TEMP/fix-rpath.cmake"
@@ -215,7 +207,8 @@ jobs:
             -DLLVM_ENABLE_LIBEDIT=OFF \
             -DLLVM_ENABLE_BINDINGS=OFF \
             -DLLVM_ENABLE_OCAMLDOC=OFF \
-            -DLLVM_OPTIMIZED_TABLEGEN=ON
+            -DLLVM_OPTIMIZED_TABLEGEN=ON \
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
 
       - name: Build LLVM
         run: ninja -C build
