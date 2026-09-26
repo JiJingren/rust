@@ -146,6 +146,7 @@ jobs:
           set(CMAKE_SYSTEM_PROCESSOR arm)
           set(CMAKE_OSX_SYSROOT "$SDK")
           set(CMAKE_OSX_ARCHITECTURES armv7)
+          set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")
           set(CMAKE_C_COMPILER "$CLANG")
           set(CMAKE_CXX_COMPILER "$CLANGXX")
           set(CMAKE_AR "$TB/llvm-ar")
