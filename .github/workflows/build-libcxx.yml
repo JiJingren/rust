@@ -1,0 +1,136 @@
+name: Build iOS libc++
+
+on:
+  workflow_dispatch:
+
+env:
+  SDKROOT: ${{ github.workspace }}/iPhoneOS10.3.sdk
+  IPHONEOS_DEPLOYMENT_TARGET: '5.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          root-reserve-mb: 40960
+
+      - name: Checkout llvm-project
+        uses: actions/checkout@v4
+        with:
+          repository: rust-lang/llvm-project
+          ref: 1b9c0d5ff9bbe7634aead059efe6b11a7eeba145
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-19 libc++-19-dev \
+            || sudo apt-get install -y --no-install-recommends ninja-build clang libc++-dev
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          CC=$(command -v clang-19 || command -v clang)
+          "$CC" --version | head -1
+
+      - name: Install iOS toolchain and SDK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.toolchain"
+          curl -sL "https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$(uname -m).tar.xz" \
+            | tar -xJvf - -C "$GITHUB_WORKSPACE/.toolchain/"
+          CLANG="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/clang"
+          test -x "$CLANG"
+          curl -sL -o "$RUNNER_TEMP/ios-sdk.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS10.3.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
+
+      - name: Set up Ninja environment
+        run: echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
+
+      - name: Configure libc++ runtimes for armv7-apple-ios
+        run: |
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          SDK="$GITHUB_WORKSPACE/iPhoneOS10.3.sdk"
+          CLANG=$(command -v clang-19 || command -v clang)
+          CLANGXX=$(command -v clang++-19 || command -v clang++)
+          V1=$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)
+          test -x "$CLANG" && test -x "$CLANGXX"
+          test -d "$V1"
+          echo 'set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")' > "$RUNNER_TEMP/fix-rpath.cmake"
+          cat > "$RUNNER_TEMP/ios-armv7.cmake" <<EOF
+          set(CMAKE_SYSTEM_NAME Darwin)
+          set(CMAKE_SYSTEM_PROCESSOR arm)
+          set(CMAKE_OSX_SYSROOT "$SDK")
+          set(CMAKE_OSX_ARCHITECTURES armv7)
+          set(CMAKE_PROJECT_INCLUDE "$RUNNER_TEMP/fix-rpath.cmake")
+          set(CMAKE_C_COMPILER "$CLANG")
+          set(CMAKE_CXX_COMPILER "$CLANGXX")
+          set(CMAKE_AR "$TB/llvm-ar")
+          set(CMAKE_RANLIB "$TB/llvm-ranlib")
+          set(CMAKE_C_FLAGS_INIT "-target armv7-apple-ios -B$TB")
+          set(CMAKE_CXX_FLAGS_INIT "-target armv7-apple-ios -B$TB -include machine/_types.h -nostdinc++ -isystem $V1 -stdlib=libc++")
+          set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+          set(CMAKE_FIND_ROOT_PATH "$SDK")
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          EOF
+          cmake -G Ninja -S runtimes -B build-libcxx \
+            -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/ios-armv7.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/llvm-ios" \
+            -DCMAKE_INSTALL_NAME_DIR="/usr/lib" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+            -DLIBCXX_ENABLE_SHARED=ON \
+            -DLIBCXX_ENABLE_STATIC=OFF \
+            -DLIBCXXABI_ENABLE_SHARED=ON \
+            -DLIBCXXABI_ENABLE_STATIC=OFF \
+            -DLIBCXX_INCLUDE_TESTS=OFF \
+            -DLIBCXX_INCLUDE_EXAMPLES=OFF \
+            -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+            -DLIBCXX_INCLUDE_DOCS=OFF \
+            -DLIBCXXABI_INCLUDE_TESTS=OFF \
+            -DLIBCXXABI_INCLUDE_DOCS=OFF \
+            -DLIBUNWIND_INCLUDE_TESTS=OFF \
+            -DLIBUNWIND_INCLUDE_DOCS=OFF \
+            -DLIBCXX_CXX_ABI=libcxxabi
+
+      - name: Build and install libc++ runtimes
+        run: |
+          ninja -C build-libcxx
+          ninja -C build-libcxx install
+          OT="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/otool"
+          for f in "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib \
+                   "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib \
+                   "$GITHUB_WORKSPACE"/llvm-ios/lib/libunwind.1.dylib; do
+            if [ -f "$f" ]; then
+              echo "== $f"
+              "$OT" -L "$f" | head -3
+            fi
+          done
+          NM="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/llvm-nm"
+          "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib | grep -E "__Znwm$" && echo "abi exports operator new: OK"
+          "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib | grep -E "__ZNSt3__119__shared_mutex_base4lockEv$" && echo "cxx exports shared_mutex: OK"
+
+      - name: Package
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          tar -cJf libcxx-ios-armv7.tar.xz \
+            llvm-ios/lib/libc++.1.dylib \
+            llvm-ios/lib/libc++abi.dylib \
+            llvm-ios/lib/libunwind.1.dylib \
+            $(ls llvm-ios/lib/libc++*.a llvm-ios/lib/libc++abi.a 2>/dev/null || true)
+          ls -la libcxx-ios-armv7.tar.xz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcxx-ios-armv7
+          path: libcxx-ios-armv7.tar.xz
+          if-no-files-found: error
