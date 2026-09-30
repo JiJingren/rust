@@ -267,6 +267,7 @@ struct DirStream(*mut libc::DIR);
 cfg_select! {
     any(
         target_os = "redox",
+        target_os = "ios",
         target_os = "espidf",
         target_os = "horizon",
         target_os = "vita",
@@ -1023,7 +1024,7 @@ impl DirEntry {
             target_os = "fuchsia",
             target_os = "hurd",
             target_os = "illumos",
-            target_vendor = "apple",
+            all(target_vendor = "apple", not(target_os = "ios")),
         ),
         not(miri) // no dirfd on Miri
     ))]
@@ -1054,7 +1055,7 @@ impl DirEntry {
             target_os = "fuchsia",
             target_os = "hurd",
             target_os = "illumos",
-            target_vendor = "apple",
+            all(target_vendor = "apple", not(target_os = "ios")),
         )),
         miri // no dirfd on Miri
     ))]
@@ -2029,6 +2030,7 @@ pub fn link(original: &CStr, link: &CStr) -> io::Result<()> {
             target_os = "vxworks",
             target_os = "redox",
             target_os = "espidf",
+            target_os = "ios",
             // Other misc platforms
             target_os = "horizon",
             target_os = "vita",
@@ -2327,9 +2329,13 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
 
     let (reader, reader_metadata) = open_from(from)?;
 
+    #[cfg(not(target_os = "ios"))]
     let clonefile_result = run_path_with_cstr(to, &|to| {
         cvt(unsafe { libc::fclonefileat(reader.as_raw_fd(), libc::AT_FDCWD, to.as_ptr(), 0) })
     });
+    #[cfg(target_os = "ios")]
+    let clonefile_result: io::Result<usize> =
+        Err(io::Error::from_raw_os_error(libc::ENOTSUP));
     match clonefile_result {
         Ok(_) => return Ok(reader_metadata.len()),
         Err(e) => match e.raw_os_error() {
@@ -2421,6 +2427,7 @@ pub use remove_dir_impl::remove_dir_all;
 // Fallback for REDOX, ESP-ID, Horizon, Vita, Vxworks and Miri
 #[cfg(any(
     target_os = "redox",
+    target_os = "ios",
     target_os = "espidf",
     target_os = "horizon",
     target_os = "vita",
@@ -2437,6 +2444,7 @@ mod remove_dir_impl {
 // Modern implementation using openat(), unlinkat() and fdopendir()
 #[cfg(not(any(
     target_os = "redox",
+    target_os = "ios",
     target_os = "espidf",
     target_os = "horizon",
     target_os = "vita",
