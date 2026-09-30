@@ -1646,6 +1646,7 @@ unsafe extern "C" {
 
     pub(crate) fn LLVMDisposeMessage(message: *mut c_char);
 
+    #[allow(dead_code)]
     pub(crate) fn LLVMIsMultithreaded() -> Bool;
 
     pub(crate) fn LLVMStructCreateNamed(C: &Context, Name: *const c_char) -> &Type;
