@@ -696,7 +696,9 @@ impl MetadataBlob {
         let found_version =
             LazyValue::<String>::from_position(NonZero::new(METADATA_HEADER.len() + 8).unwrap())
                 .decode(self);
-        if rustc_version(cfg_version) != found_version {
+        let expected = rustc_version(cfg_version);
+        let version_mismatch = expected.split(" (").next() != found_version.split(" (").next();
+        if version_mismatch {
             return Err(Some(found_version));
         }
 
