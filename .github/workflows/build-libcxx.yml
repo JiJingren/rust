@@ -1,0 +1,210 @@
+name: Build iOS libc++
+
+on:
+  workflow_dispatch:
+
+env:
+  SDKROOT: ${{ github.workspace }}/iPhoneOS10.3.sdk
+  IPHONEOS_DEPLOYMENT_TARGET: '5.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          root-reserve-mb: 40960
+
+      - name: Fetch llvm-project 19.1.7 source
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/llvm19"
+          curl -sL "https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-19.1.7.tar.gz" \
+            | tar -xz -C "$GITHUB_WORKSPACE/llvm19" --strip-components=1 \
+              llvm-project-llvmorg-19.1.7/libcxx \
+              llvm-project-llvmorg-19.1.7/libcxxabi \
+              llvm-project-llvmorg-19.1.7/runtimes \
+              llvm-project-llvmorg-19.1.7/llvm/cmake \
+              llvm-project-llvmorg-19.1.7/llvm/utils \
+              llvm-project-llvmorg-19.1.7/clang/cmake \
+              llvm-project-llvmorg-19.1.7/cmake
+          test -d "$GITHUB_WORKSPACE/llvm19/libcxx/include"
+          test -d "$GITHUB_WORKSPACE/llvm19/libcxxabi/src"
+          test -f "$GITHUB_WORKSPACE/llvm19/runtimes/CMakeLists.txt"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-19 libc++-19-dev \
+            || sudo apt-get install -y --no-install-recommends ninja-build clang libc++-dev
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          CC=$(command -v clang-19 || command -v clang)
+          "$CC" --version | head -1
+
+      - name: Install iOS toolchain and SDK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.toolchain"
+          curl -sL "https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$(uname -m).tar.xz" \
+            | tar -xJvf - -C "$GITHUB_WORKSPACE/.toolchain/"
+          CLANG="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/clang"
+          test -x "$CLANG"
+          curl -sL -o "$RUNNER_TEMP/ios-sdk.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS10.3.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
+
+      - name: Patch SDK tbd stubs
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, yaml
+
+          class L(yaml.SafeLoader):
+              pass
+
+          def tagged(loader, suffix, node):
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              return loader.construct_scalar(node)
+
+          L.add_multi_constructor('!', tagged)
+
+          PATCH = {
+              'usr/lib/system/libsystem_c.tbd': [
+                  '_bcmp', '_bzero', '_memccpy', '_memchr', '_memcmp', '_memcpy',
+                  '_memmove', '_memset', '_memset_pattern16', '_memset_pattern4',
+                  '_memset_pattern8', '_strchr', '_strcmp', '_strncmp',
+              ],
+              'usr/lib/system/libunwind.tbd': [
+                  '__Unwind_Backtrace', '__Unwind_FindEnclosingFunction',
+                  '__Unwind_Find_FDE', '__Unwind_ForcedUnwind',
+                  '__Unwind_RaiseException', '__Unwind_Resume',
+                  '__Unwind_Resume_or_Rethrow', '___deregister_frame',
+                  '___register_frame', '_unw_get_fpreg', '_unw_get_proc_info',
+                  '_unw_get_proc_name', '_unw_get_reg', '_unw_init_local',
+                  '_unw_is_fpreg', '_unw_is_signal_frame',
+                  '_unw_iterate_dwarf_unwind_cache', '_unw_regname', '_unw_resume',
+                  '_unw_set_fpreg', '_unw_set_reg', '_unw_step',
+              ],
+              'usr/lib/system/libsystem_platform.tbd': [
+                  '_memset_pattern16',
+              ],
+          }
+          sdk = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'iPhoneOS10.3.sdk'
+          for rel, syms in PATCH.items():
+              p = sdk / rel
+              t = p.read_text()
+              d = yaml.load(re.sub(r'^--- !\S+', '---', t, flags=re.M), Loader=L)
+              have = set()
+              for e in d['exports']:
+                  for v in e.values():
+                      if isinstance(v, list):
+                          have |= set(v)
+              add = [s for s in syms if s not in have]
+              if not add:
+                  print(f'{rel}: already present')
+                  continue
+              i = t.index('symbols:')
+              j = t.index('[', i)
+              p.write_text(t[:j + 1] + ' ' + ', '.join(add) + ',' + t[j + 1:])
+              d2 = yaml.load(re.sub(r'^--- !\S+', '---', p.read_text(), flags=re.M), Loader=L)
+              for s in add:
+                  assert s in d2['exports'][0]['symbols'], f'{s} missing after patch'
+              print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
+          PY
+
+          find "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk" -name '*.tbd' -exec sed -i 's/, i386, x86_64//g; s/\[ i386, x86_64, /[ /g; s/\[ i386, x86_64/[ /g' {} +
+          grep -m1 archs "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
+
+      - name: Set up Ninja environment
+        run: echo "NINJA_STATUS=[%f/%t %p %e] " >> $GITHUB_ENV
+
+      - name: Configure libc++ runtimes for armv7-apple-ios
+        run: |
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          SDK="$GITHUB_WORKSPACE/iPhoneOS10.3.sdk"
+          CLANG=$(command -v clang-19 || command -v clang)
+          CLANGXX=$(command -v clang++-19 || command -v clang++)
+          test -x "$CLANG" && test -x "$CLANGXX"
+          echo 'set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")' > "$RUNNER_TEMP/fix-rpath.cmake"
+          cat > "$RUNNER_TEMP/ios-armv7.cmake" <<EOF
+          set(CMAKE_SYSTEM_NAME Darwin)
+          set(CMAKE_SYSTEM_PROCESSOR arm)
+          set(CMAKE_OSX_SYSROOT "$SDK")
+          set(CMAKE_OSX_ARCHITECTURES armv7)
+          set(CMAKE_PROJECT_INCLUDE "$RUNNER_TEMP/fix-rpath.cmake")
+          set(CMAKE_C_COMPILER "$CLANG")
+          set(CMAKE_CXX_COMPILER "$CLANGXX")
+          set(CMAKE_AR "$TB/llvm-ar")
+          set(CMAKE_RANLIB "$TB/llvm-ranlib")
+          set(CMAKE_C_FLAGS_INIT "-target armv7-apple-ios -B$TB")
+          set(CMAKE_CXX_FLAGS_INIT "-target armv7-apple-ios -B$TB -include machine/_types.h -nostdinc++ -D_LIBCPP_HAS_NO_C11_ALIGNED_ALLOC=")
+          set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+          set(CMAKE_FIND_ROOT_PATH "$SDK")
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          set(CMAKE_EXE_LINKER_FLAGS_INIT "-L$SDK/usr/lib/system -lunwind")
+          set(CMAKE_SHARED_LINKER_FLAGS_INIT "-L$SDK/usr/lib/system -lunwind")
+          EOF
+          cmake -G Ninja -S "$GITHUB_WORKSPACE/llvm19/runtimes" -B build-libcxx \
+            -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/ios-armv7.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/llvm-ios" \
+            -DCMAKE_INSTALL_NAME_DIR="/usr/lib" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+            -DLIBCXX_ENABLE_SHARED=ON \
+            -DLIBCXX_ENABLE_STATIC=OFF \
+            -DLIBCXXABI_ENABLE_SHARED=ON \
+            -DLIBCXXABI_ENABLE_STATIC=OFF \
+            -DLIBCXX_INCLUDE_TESTS=OFF \
+            -DLIBCXX_INCLUDE_EXAMPLES=OFF \
+            -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+            -DLIBCXX_INCLUDE_DOCS=OFF \
+            -DLIBCXXABI_INCLUDE_TESTS=OFF \
+            -DLIBCXXABI_INCLUDE_DOCS=OFF \
+            -DLIBCXX_CXX_ABI=libcxxabi \
+            -DLIBCXXABI_HAS_GCC_LIB=FALSE \
+            -DLIBCXXABI_HAS_GCC_S_LIB=FALSE \
+            -DLIBCXX_HAS_GCC_LIB=FALSE \
+            -DLIBCXX_HAS_GCC_S_LIB=FALSE \
+            -DCMAKE_OSX_ARCHITECTURES=armv7
+
+      - name: Build and install libc++ runtimes
+        run: |
+          ninja -C build-libcxx
+          ninja -C build-libcxx install
+          OT="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/otool"
+          OTN="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/install_name_tool"
+          NM="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/llvm-nm"
+          LIB="$GITHUB_WORKSPACE/llvm-ios/lib"
+          "$OTN" -id /usr/lib/libc++.1.dylib "$LIB/libc++.1.0.dylib"
+          "$OTN" -change @rpath/libc++abi.1.dylib /usr/lib/libc++abi.dylib "$LIB/libc++.1.0.dylib"
+          "$OTN" -id /usr/lib/libc++abi.dylib "$LIB/libc++abi.1.0.dylib"
+          ls -la "$LIB"/
+          "$OT" -D "$GITHUB_WORKSPACE"/llvm-ios/lib/*.dylib || true
+          "$OT" -L "$GITHUB_WORKSPACE"/llvm-ios/lib/*.dylib || true
+          "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++abi.dylib | grep -E "__Znwm$" && echo "abi exports operator new: OK"
+          "$NM" -arch armv7 -gU "$GITHUB_WORKSPACE"/llvm-ios/lib/libc++.1.dylib | grep -E "__ZNSt3__119__shared_mutex_base4lockEv$" && echo "cxx exports shared_mutex: OK"
+
+      - name: Package
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          tar -cJf libcxx-ios-armv7.tar.xz llvm-ios/lib/libc++*.dylib*
+          ls -la libcxx-ios-armv7.tar.xz
+          tar -tJf libcxx-ios-armv7.tar.xz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcxx-ios-armv7
+          path: libcxx-ios-armv7.tar.xz
+          if-no-files-found: error

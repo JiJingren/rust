@@ -1,0 +1,1117 @@
+name: Build iOS Rust
+
+on:
+  workflow_dispatch:
+
+env:
+  SDKROOT: ${{ github.workspace }}/iPhoneOS10.3.sdk
+  IPHONEOS_DEPLOYMENT_TARGET: '7.0'
+  BOOTSTRAP_SKIP_TARGET_SANITY: "1"
+  LLVM_LINK_SHARED: "1"
+  CARGO_HOME: ${{ github.workspace }}/.cargo-home
+  TMPDIR: ${{ github.workspace }}/.tmp
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          root-reserve-mb: 40960
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Prepare workspace dirs
+        run: |
+          mkdir -p "$CARGO_HOME" "$TMPDIR"
+          df -h
+
+      - name: Init the only submodules we need
+        run: |
+          git submodule sync
+          for p in library/backtrace src/tools/cargo src/llvm-project; do
+            git submodule update --init --depth 1 "$p" \
+              || git submodule update --init --force "$p" \
+              || true
+          done
+          git submodule status
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build git python3 curl \
+            libssl-dev pkg-config \
+            || true
+          sudo apt-get install -y --no-install-recommends clang-19 libc++-19-dev \
+            || sudo apt-get install -y --no-install-recommends clang libc++-dev
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          CCBIN=$(command -v clang-19 || command -v clang)
+          CXXBIN=$(command -v clang++-19 || command -v clang++)
+          test -x "$CCBIN"
+          test -x "$CXXBIN"
+          V1=$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)
+          test -d "$V1"
+          echo "CC=$CCBIN" >> "$GITHUB_ENV"
+          echo "CXX=$CXXBIN" >> "$GITHUB_ENV"
+          echo "CXX_INCLUDE=$V1" >> "$GITHUB_ENV"
+          "$CCBIN" --version | head -1
+
+      - name: Install iOS toolchain and SDK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.toolchain"
+          curl -sL "https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$(uname -m).tar.xz" \
+            | tar -xJvf - -C "$GITHUB_WORKSPACE/.toolchain/"
+          CLANG="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin/clang"
+          test -x "$CLANG"
+          "$CLANG" --version
+          curl -sL -o "$RUNNER_TEMP/ios-sdk.tar.xz" \
+            "https://github.com/theos/sdks/releases/latest/download/iPhoneOS10.3.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ios-sdk.tar.xz" -C "$GITHUB_WORKSPACE"
+          test -d "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr"
+          grep -m1 -E "^(archs|targets):" "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libSystem.tbd"
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          test -x "$TB/llvm-ar"
+          echo "CC_armv7_apple_ios=$CC" >> "$GITHUB_ENV"
+          echo "CXX_armv7_apple_ios=$CXX" >> "$GITHUB_ENV"
+          echo "AR_armv7_apple_ios=$TB/llvm-ar" >> "$GITHUB_ENV"
+          echo "CFLAGS_armv7_apple_ios=-target armv7-apple-ios -isysroot $SDKROOT" >> "$GITHUB_ENV"
+          echo "CXXFLAGS_armv7_apple_ios=-target armv7-apple-ios -isysroot $SDKROOT" >> "$GITHUB_ENV"
+
+      - name: Patch SDK tbd stubs
+        run: |
+          printf '#ifndef _CRT_EXTERNS_H_\n#define _CRT_EXTERNS_H_\n#include <sys/cdefs.h>\n__BEGIN_DECLS\nextern char ***_NSGetEnviron(void);\n__END_DECLS\n#endif\n' > "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/include/crt_externs.h"
+          python3 - <<'PY'
+          import os, pathlib, re, yaml
+
+          class L(yaml.SafeLoader):
+              pass
+
+          def tagged(loader, suffix, node):
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node)
+              return loader.construct_scalar(node)
+
+          L.add_multi_constructor('!', tagged)
+
+          PATCH = {
+              'usr/lib/system/libsystem_c.tbd': [
+                  '_bcmp', '_bzero', '_memccpy', '_memchr', '_memcmp', '_memcpy',
+                  '_memmove', '_memset', '_memset_pattern16', '_memset_pattern4',
+                  '_memset_pattern8', '_strchr', '_strcmp', '_strncmp',
+              ],
+              'usr/lib/system/libunwind.tbd': [
+                  '__Unwind_Backtrace', '__Unwind_FindEnclosingFunction',
+                  '__Unwind_Find_FDE', '__Unwind_ForcedUnwind',
+                  '__Unwind_RaiseException', '__Unwind_Resume',
+                  '__Unwind_Resume_or_Rethrow', '___deregister_frame',
+                  '___register_frame', '_unw_get_fpreg', '_unw_get_proc_info',
+                  '_unw_get_proc_name', '_unw_get_reg', '_unw_init_local',
+                  '_unw_is_fpreg', '_unw_is_signal_frame',
+                  '_unw_iterate_dwarf_unwind_cache', '_unw_regname', '_unw_resume',
+                  '_unw_set_fpreg', '_unw_set_reg', '_unw_step',
+              ],
+              'usr/lib/system/libsystem_platform.tbd': [
+                  '_memset_pattern16',
+              ],
+          }
+          sdk = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'iPhoneOS10.3.sdk'
+          for rel, syms in PATCH.items():
+              p = sdk / rel
+              t = p.read_text()
+              d = yaml.load(re.sub(r'^--- !\S+', '---', t, flags=re.M), Loader=L)
+              have = set()
+              for e in d['exports']:
+                  for v in e.values():
+                      if isinstance(v, list):
+                          have |= set(v)
+              add = [s for s in syms if s not in have]
+              if not add:
+                  print(f'{rel}: already present')
+                  continue
+              i = t.index('symbols:')
+              j = t.index('[', i)
+              p.write_text(t[:j + 1] + ' ' + ', '.join(add) + ',' + t[j + 1:])
+              d2 = yaml.load(re.sub(r'^--- !\S+', '---', p.read_text(), flags=re.M), Loader=L)
+              for s in add:
+                  assert s in d2['exports'][0]['symbols'], f'{s} missing after patch'
+              print(f'{rel}: added {len(add)} symbols for archs={d["exports"][0]["archs"]}')
+          PY
+
+          cat > "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/librt.tbd" <<'TBD'
+          ---
+          archs:                 [ armv7 ]
+          platform:              ios
+          install-name:          /usr/lib/libSystem.B.dylib
+          current-version:       0
+          compatibility-version: 1
+          exports:
+            - archs:              [ armv7 ]
+              symbols:            [ ]
+          ...
+          TBD
+
+          cat > "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/usr/lib/libatomic.tbd" <<'TBD'
+          ---
+          archs:                 [ armv7 ]
+          platform:              ios
+          install-name:          /usr/lib/libSystem.B.dylib
+          current-version:       0
+          compatibility-version: 1
+          exports:
+            - archs:              [ armv7 ]
+              symbols:            [ ]
+          ...
+          TBD
+
+          mkdir -p "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/System/Library/Frameworks/CoreServices.framework"
+          cat > "$GITHUB_WORKSPACE/iPhoneOS10.3.sdk/System/Library/Frameworks/CoreServices.framework/CoreServices.tbd" <<'TBD'
+          ---
+          archs:                 [ armv7 ]
+          platform:              ios
+          install-name:          /System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices
+          current-version:       0
+          compatibility-version: 1
+          exports:
+            - archs:              [ armv7 ]
+              symbols:            [ ]
+          ...
+          TBD
+
+      - name: Build OpenSSL for armv7 iOS
+        run: |
+          set -euo pipefail
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          SHIM="$GITHUB_WORKSPACE/shim"
+          mkdir -p "$SHIM" "$GITHUB_WORKSPACE/xcrun/SDKs"
+          ln -sfn "$SDKROOT" "$GITHUB_WORKSPACE/xcrun/SDKs/iPhoneOS10.3.sdk"
+          cat > "$SHIM/atomics_shim.c" <<'SHIMC'
+          typedef unsigned char u8;
+          typedef unsigned short u16;
+          typedef unsigned int u32;
+
+          _Bool shim_atomic_is_lock_free(unsigned long size, const volatile void *ptr)
+              __asm__("___atomic_is_lock_free");
+          _Bool shim_atomic_is_lock_free(unsigned long size, const volatile void *ptr) {
+              (void)ptr;
+              return size <= 8;
+          }
+
+          void shim_atomic_load(unsigned long size, const void *ptr, void *ret, int order)
+              __asm__("___atomic_load");
+          void shim_atomic_load(unsigned long size, const void *ptr, void *ret, int order) {
+              u8 *r = (u8 *)ret;
+              unsigned long i;
+              (void)order;
+              if (size == 8 && (((unsigned long)ptr & 7u) == 0)) {
+                  u32 lo, hi, tmp[2];
+                  __asm__ volatile("ldrexd %0, %1, [%2]"
+                                   : "=&r"(lo), "=&r"(hi)
+                                   : "r"(ptr)
+                                   : "memory");
+                  tmp[0] = lo;
+                  tmp[1] = hi;
+                  for (i = 0; i < 8; i++)
+                      r[i] = ((const u8 *)tmp)[i];
+                  return;
+              }
+              if (size == 4 && (((unsigned long)ptr & 3u) == 0)) {
+                  u32 v;
+                  __asm__ volatile("ldrex %0, [%1]" : "=r"(v) : "r"(ptr) : "memory");
+                  for (i = 0; i < 4; i++)
+                      r[i] = ((const u8 *)&v)[i];
+                  return;
+              }
+              if (size == 2 && (((unsigned long)ptr & 1u) == 0)) {
+                  u16 v;
+                  __asm__ volatile("ldrexh %0, [%1]" : "=r"(v) : "r"(ptr) : "memory");
+                  r[0] = (u8)v;
+                  r[1] = (u8)(v >> 8);
+                  return;
+              }
+              if (size == 1) {
+                  u8 v;
+                  __asm__ volatile("ldrexb %0, [%1]" : "=r"(v) : "r"(ptr) : "memory");
+                  r[0] = v;
+                  return;
+              }
+              for (i = 0; i < size; i++)
+                  r[i] = ((const volatile u8 *)ptr)[i];
+          }
+
+          void shim_atomic_store(unsigned long size, void *ptr, const void *val, int order)
+              __asm__("___atomic_store");
+          void shim_atomic_store(unsigned long size, void *ptr, const void *val, int order) {
+              const u8 *v = (const u8 *)val;
+              unsigned long i;
+              (void)order;
+              if (size == 8 && (((unsigned long)ptr & 7u) == 0)) {
+                  u32 lo = 0, hi = 0, res;
+                  for (i = 0; i < 4; i++)
+                      lo |= ((u32)v[i]) << (i * 8);
+                  for (i = 0; i < 4; i++)
+                      hi |= ((u32)v[4 + i]) << (i * 8);
+                  for (;;) {
+                      __asm__ volatile("strexd %0, %2, %3, [%1]"
+                                       : "=&r"(res)
+                                       : "r"(ptr), "r"(lo), "r"(hi)
+                                       : "memory");
+                      if (res == 0)
+                          break;
+                  }
+                  return;
+              }
+              if (size == 4 && (((unsigned long)ptr & 3u) == 0)) {
+                  u32 w = 0, res;
+                  for (i = 0; i < 4; i++)
+                      w |= ((u32)v[i]) << (i * 8);
+                  for (;;) {
+                      __asm__ volatile("strex %0, %2, [%1]"
+                                       : "=&r"(res)
+                                       : "r"(ptr), "r"(w)
+                                       : "memory");
+                      if (res == 0)
+                          break;
+                  }
+                  return;
+              }
+              if (size == 2 && (((unsigned long)ptr & 1u) == 0)) {
+                  u16 h = (u16)(v[0] | ((u16)v[1] << 8));
+                  u32 res;
+                  for (;;) {
+                      __asm__ volatile("strexh %0, %2, [%1]"
+                                       : "=&r"(res)
+                                       : "r"(ptr), "r"(h)
+                                       : "memory");
+                      if (res == 0)
+                          break;
+                  }
+                  return;
+              }
+              if (size == 1) {
+                  u32 res;
+                  for (;;) {
+                      __asm__ volatile("strex %0, %2, [%1]"
+                                       : "=&r"(res)
+                                       : "r"(ptr), "r"((u32)v[0])
+                                       : "memory");
+                      if (res == 0)
+                          break;
+                  }
+                  return;
+              }
+              for (i = 0; i < size; i++)
+                  ((volatile u8 *)ptr)[i] = v[i];
+          }
+          SHIMC
+          cat > "$SHIM/git2_shim.c" <<'GIT2C'
+          typedef unsigned char u8;
+          typedef unsigned int u32;
+
+          _Bool shim_git2_compare_exchange(unsigned long size, void *ptr, void *expected,
+                                            const void *desired, int success_order,
+                                            int failure_order)
+              __asm__("___atomic_compare_exchange");
+          _Bool shim_git2_compare_exchange(unsigned long size, void *ptr, void *expected,
+                                            const void *desired, int success_order,
+                                            int failure_order) {
+              (void)success_order;
+              (void)failure_order;
+              if (size == 8 && (((unsigned long)ptr & 7u) == 0) &&
+                  (((unsigned long)expected & 7u) == 0)) {
+                  const u8 *d = (const u8 *)desired;
+                  u32 *e = (u32 *)expected;
+                  u32 el = e[0], eh = e[1];
+                  u32 dl = 0, dh = 0, lo, hi, res;
+                  unsigned long i;
+                  for (i = 0; i < 4; i++)
+                      dl |= ((u32)d[i]) << (i * 8);
+                  for (i = 0; i < 4; i++)
+                      dh |= ((u32)d[4 + i]) << (i * 8);
+                  for (;;) {
+                      __asm__ volatile("ldrexd %0, %1, [%2]"
+                                       : "=&r"(lo), "=&r"(hi)
+                                       : "r"(ptr)
+                                       : "memory");
+                      if (lo != el || hi != eh) {
+                          e[0] = lo;
+                          e[1] = hi;
+                          return 0;
+                      }
+                      __asm__ volatile("strexd %0, %2, %3, [%1]"
+                                       : "=&r"(res)
+                                       : "r"(ptr), "r"(dl), "r"(dh)
+                                       : "memory");
+                      if (res == 0)
+                          return 1;
+                  }
+              }
+              if (size == 4 && (((unsigned long)ptr & 3u) == 0)) {
+                  u32 *e = (u32 *)expected;
+                  u32 el = e[0], dl = 0, cur, res;
+                  const u8 *d = (const u8 *)desired;
+                  unsigned long i;
+                  for (i = 0; i < 4; i++)
+                      dl |= ((u32)d[i]) << (i * 8);
+                  for (;;) {
+                      __asm__ volatile("ldrex %0, [%1]" : "=&r"(cur) : "r"(ptr) : "memory");
+                      if (cur != el) {
+                          e[0] = cur;
+                          return 0;
+                      }
+                      __asm__ volatile("strex %0, %2, [%1]"
+                                       : "=&r"(res)
+                                       : "r"(ptr), "r"(dl)
+                                       : "memory");
+                      if (res == 0)
+                          return 1;
+                  }
+              }
+              {
+                  u8 *p = (u8 *)ptr, *e = (u8 *)expected;
+                  const u8 *d = (const u8 *)desired;
+                  unsigned long i;
+                  int same = 1;
+                  for (i = 0; i < size; i++) {
+                      if (e[i] != p[i]) {
+                          same = 0;
+                          break;
+                      }
+                  }
+                  if (same) {
+                      for (i = 0; i < size; i++)
+                          p[i] = d[i];
+                      return 1;
+                  }
+                  for (i = 0; i < size; i++)
+                      e[i] = p[i];
+                  return 0;
+              }
+          }
+          GIT2C
+          "$CC" -target armv7-apple-ios -miphoneos-version-min=6.1.3 -isysroot "$SDKROOT" \
+            -O2 -c "$SHIM/atomics_shim.c" -o "$SHIM/atomics_shim.o"
+          "$CC" -target armv7-apple-ios -miphoneos-version-min=6.1.3 -isysroot "$SDKROOT" \
+            -O2 -c "$SHIM/git2_shim.c" -o "$SHIM/git2_shim.o"
+          NM="$TB/llvm-nm"
+          [ -x "$NM" ] || NM="$TB/nm"
+          "$NM" "$SHIM/atomics_shim.o"
+          "$NM" "$SHIM/git2_shim.o"
+          "$NM" "$SHIM/atomics_shim.o" | grep -qE '[[:space:]]T[[:space:]]+___atomic_is_lock_free$'
+          "$NM" "$SHIM/atomics_shim.o" | grep -qE '[[:space:]]T[[:space:]]+___atomic_load$'
+          "$NM" "$SHIM/atomics_shim.o" | grep -qE '[[:space:]]T[[:space:]]+___atomic_store$'
+          "$NM" "$SHIM/git2_shim.o" | grep -qE '[[:space:]]T[[:space:]]+___atomic_compare_exchange$'
+          "$TB/llvm-ar" rcs "$SHIM/libatomicsshim.a" "$SHIM/atomics_shim.o"
+          curl -sL -o "$RUNNER_TEMP/openssl.tar.gz" \
+            "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz"
+          tar -xzf "$RUNNER_TEMP/openssl.tar.gz" -C "$GITHUB_WORKSPACE"
+          export CROSS_TOP="$GITHUB_WORKSPACE/xcrun"
+          export CROSS_SDK=iPhoneOS10.3.sdk
+          cd "$GITHUB_WORKSPACE/openssl-3.6.3"
+          ./Configure iphoneos-cross no-shared no-tests no-asm no-apps no-module \
+            CC="$CC -target armv7-apple-ios -miphoneos-version-min=6.1.3" \
+            AR="$TB/llvm-ar" RANLIB="$TB/llvm-ranlib" \
+            -L"$SHIM" -latomicsshim \
+            --prefix="$GITHUB_WORKSPACE/openssl-ios"
+          make -j"$(nproc)"
+          make install_sw
+          "$TB/llvm-ar" r "$GITHUB_WORKSPACE/openssl-ios/lib/libcrypto.a" "$SHIM/atomics_shim.o"
+          "$TB/llvm-ar" r "$GITHUB_WORKSPACE/openssl-ios/lib/libssl.a" "$SHIM/atomics_shim.o"
+          "$TB/llvm-ar" r "$GITHUB_WORKSPACE/openssl-ios/lib/libcrypto.a" "$SHIM/git2_shim.o"
+          "$TB/llvm-ar" r "$GITHUB_WORKSPACE/openssl-ios/lib/libssl.a" "$SHIM/git2_shim.o"
+          test -f "$GITHUB_WORKSPACE/openssl-ios/include/openssl/opensslv.h"
+          test -f "$GITHUB_WORKSPACE/openssl-ios/lib/libssl.a"
+          "$TB/llvm-ar" t "$GITHUB_WORKSPACE/openssl-ios/lib/libcrypto.a" | grep -qx atomics_shim.o
+          echo "OPENSSL_DIR=$GITHUB_WORKSPACE/openssl-ios" >> "$GITHUB_ENV"
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+          echo "OPENSSL_NO_VENDOR=1" >> "$GITHUB_ENV"
+          df -h
+
+      - name: Download build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pick() {
+            wf="$1"; name="$2"; dest="$3"
+            for rid in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow="$wf" \
+                          --status=success --limit 8 --json databaseId --jq '.[].databaseId'); do
+              if gh run download --repo "$GITHUB_REPOSITORY" "$rid" -n "$name" -D "$dest"; then
+                echo "downloaded $name from run $rid"
+                return 0
+              fi
+              rm -rf "$dest"
+            done
+            echo "::error::no downloadable artifact $name from workflow $wf"
+            return 1
+          }
+          pick build-ios.yml llvm-ios-armv7 dl-llvm
+          pick build.yml rust-ios-linux-x86_64 dl-stage0
+          ls -la dl-llvm dl-stage0
+          df -h
+
+      - name: Extract artifacts
+        run: |
+          set -euo pipefail
+          xt() {
+            f="$1"; d="$2"
+            case "$(head -c 2 "$f" | od -An -tx1 | tr -d ' \n')" in
+              fd37)   tar -xJf "$f" -C "$d";;
+              1f8b)   tar -xzf "$f" -C "$d";;
+              28b5)   tar --zstd -xf "$f" -C "$d";;
+              *)      tar -xf "$f" -C "$d";;
+            esac
+          }
+          LLVM="$GITHUB_WORKSPACE/llvm-ios"
+          mkdir -p "$LLVM"
+          xt dl-llvm/llvm-ios-armv7.tar.xz "$LLVM"
+          test -x "$LLVM/bin/llvm-config"
+          test -d "$LLVM/include/llvm"
+          test -f "$LLVM/include/llvm/Config/llvm-config.h"
+          test -f "$LLVM/lib/libLLVM.dylib"
+          ls "$LLVM/bin" | head
+          ls "$LLVM/lib" | wc -l
+
+          P="$GITHUB_WORKSPACE/stage0"
+          mkdir -p "$P"
+          s0() {
+            for e in xz gz zst; do
+              f="dl-stage0/$1.tar.$e"
+              if [ -f "$f" ]; then printf '%s\n' "$f"; return 0; fi
+            done
+            ls "dl-stage0/$1".tar.* | head -1
+          }
+          unpack_into() {
+            f="$1"
+            if [ -z "$f" ] || [ ! -f "$f" ]; then
+              echo "::error::no stage0 artifact to unpack: '$f'" >&2
+              return 1
+            fi
+            T=$(mktemp -d)
+            xt "$f" "$T"
+            d=$(find "$T" -mindepth 1 -maxdepth 1 -type d -print -quit)
+            if [ -n "$d" ] && [ -z "$(find "$T" -mindepth 1 -maxdepth 1 -type f -print -quit)" ]; then
+              SRC="$d"
+            else
+              SRC="$T"
+            fi
+            echo "unpacking $f from $SRC"
+            ls -la "$SRC"
+            ok=0
+            if [ -f "$SRC/install.sh" ]; then
+              if (cd "$SRC" && sh ./install.sh --prefix="$P" --disable-ldconfig); then
+                ok=1
+              else
+                echo "::warning::install.sh failed for $(basename "$f"), falling back to raw copy"
+              fi
+            fi
+            if [ "$ok" = 0 ]; then
+              for c in "$SRC"/*/; do
+                [ -d "$c" ] || continue
+                cp -a "$c". "$P"/
+              done
+            fi
+            rm -rf "$T"
+            ls -la "$P"
+          }
+          unpack_into "$(s0 rustc-nightly-x86_64-unknown-linux-gnu)"
+          chmod +x "$P/bin/rustc"
+          ls -la "$P/bin"
+          "$P/bin/rustc" --version
+          "$P/bin/rustc" --print target-list | grep -qx armv7-apple-ios
+          unpack_into "$(s0 cargo-nightly-x86_64-unknown-linux-gnu)"
+          unpack_into "$(s0 rust-std-nightly-x86_64-unknown-linux-gnu)"
+          chmod +x "$P/bin/cargo"
+          "$P/bin/cargo" --version
+          ls "$P/lib" | head -20
+          test -d "$P/lib/rustlib"
+          ls -la "$P/lib/rustlib"
+          ls -la "$P/lib/rustlib/x86_64-unknown-linux-gnu/lib" | head -10
+          df -h
+
+      - name: Install llvm-config wrapper
+        run: |
+          set -euo pipefail
+          LLVM="$GITHUB_WORKSPACE/llvm-ios"
+          if [ -f "$LLVM/bin/llvm-config" ] && [ ! -f "$LLVM/bin/llvm-config.armv7" ]; then
+            mv "$LLVM/bin/llvm-config" "$LLVM/bin/llvm-config.armv7"
+          fi
+          cat > "$LLVM/bin/llvm-config" <<'WRAPPER'
+          #!/bin/bash
+          ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+          LIB="$ROOT/lib"
+          INC="$ROOT/include"
+          V1="${CXX_INCLUDE:-}"
+          if [ -z "$V1" ]; then
+            V1="$(ls -d /usr/lib/llvm-*/include/c++/v1 /usr/include/c++/v1 2>/dev/null | sort -V | tail -1)"
+          fi
+          SDK="${SDKROOT:-}"
+          c_help=0; c_ver=0; c_comp=0; c_cxx=0; c_libs=0; c_ld=0
+          c_libdir=0; c_bindir=0; c_ht=0; c_sm=0; c_sys=0; c_libfiles=0; link_shared=0
+          for a in "$@"; do
+            case "$a" in
+              --help) c_help=1;;
+              --version) c_ver=1;;
+              --components) c_comp=1;;
+              --cxxflags) c_cxx=1;;
+              --libs) c_libs=1;;
+              --ldflags) c_ld=1;;
+              --libdir) c_libdir=1;;
+              --bindir) c_bindir=1;;
+              --host-target) c_ht=1;;
+              --shared-mode) c_sm=1;;
+              --system-libs) c_sys=1;;
+              --libfiles) c_libfiles=1;;
+              --link-shared) link_shared=1;;
+              --link-static) link_shared=0;;
+            esac
+          done
+          if [ "$c_help" = 1 ]; then
+            printf 'LLVM (https://llvm.org/) llvm-config for armv7-apple-ios\n'
+            exit 0
+          fi
+          if [ "$c_ver" = 1 ]; then printf '23.1.1\n'; fi
+          if [ "$c_ht" = 1 ]; then printf 'armv7-apple-ios\n'; fi
+          if [ "$c_libdir" = 1 ]; then printf '%s\n' "$LIB"; fi
+          if [ "$c_bindir" = 1 ]; then printf '%s\n' "$ROOT/bin"; fi
+          if [ "$c_sm" = 1 ]; then
+            if [ "$link_shared" = 1 ]; then printf 'shared\n'; else printf 'static\n'; fi
+          fi
+          if [ "$c_comp" = 1 ]; then
+            printf '%s\n' "ipo bitreader bitwriter linker asmparser lto coverage instrumentation arm x86 all-targets native nativecodegen engine interpreter mcjit orcjit executionengine runtimedyld object objectyaml bitcode irreader remarks symbolize binaryformat support tablegen passes scalaropts transformutils vectorize instcombine aggressiveinstcombine objcarcopts profiledata coroutines debuginfodwarf debuginfocodeview debuginfomsf debuginfopdb debuginfologicalview frontendatomic frontendopenmp frontendoffload frontendopenacc frontenddriver frontendhlsl frontenddirective"
+          fi
+          if [ "$c_cxx" = 1 ]; then
+            if [ -z "$V1" ]; then
+              echo "llvm-config wrapper: no libc++ headers found (set CXX_INCLUDE)" >&2
+              exit 1
+            fi
+            printf -- '-I%s' "$INC"
+            if [ -n "$SDK" ]; then printf -- ' -isysroot %s -include machine/_types.h' "$SDK"; fi
+            printf -- ' -nostdinc++ -isystem %s -stdlib=libc++ -fPIC -fno-exceptions -fno-rtti -std=c++20 -DNDEBUG\n' "$V1"
+          fi
+          if [ "$c_sys" = 1 ]; then printf '\n'; fi
+          if [ "$c_libfiles" = 1 ]; then printf '\n'; fi
+          if [ "$c_libs" = 1 ]; then
+            if [ "$link_shared" = 1 ]; then
+              printf -- '-lLLVM\n'
+            else
+              for f in "$LIB"/libLLVM*.a; do printf '%s\n' "$f"; done
+            fi
+          fi
+          if [ "$c_ld" = 1 ]; then printf -- '-L%s\n' "$LIB"; fi
+          exit 0
+          WRAPPER
+          chmod +x "$LLVM/bin/llvm-config"
+          file "$LLVM/bin/llvm-config"
+          "$LLVM/bin/llvm-config" --version
+          "$LLVM/bin/llvm-config" --bindir
+          "$LLVM/bin/llvm-config" --libdir
+          "$LLVM/bin/llvm-config" --link-shared --ldflags
+
+      - name: Generate bootstrap config.toml
+        run: |
+          set -euo pipefail
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          P="$GITHUB_WORKSPACE/stage0"
+          LLVM="$GITHUB_WORKSPACE/llvm-ios"
+          cat > config.toml <<EOF
+          change-id = "ignore"
+
+          [build]
+          build = "x86_64-unknown-linux-gnu"
+          host = ["armv7-apple-ios"]
+          target = ["armv7-apple-ios"]
+          rustc = "$P/bin/rustc"
+          cargo = "$P/bin/cargo"
+          docs = false
+          extended = false
+          tools = []
+          python = "python3"
+          local-rebuild = true
+
+          [build.tool.cargo]
+          features = ["vendored-libgit2"]
+
+          [llvm]
+          download-ci-llvm = false
+          link-shared = true
+
+          [rust]
+          codegen-units = 0
+          debug = false
+          debug-assertions = false
+          overflow-checks = false
+          channel = "nightly"
+          rpath = false
+          deny-warnings = false
+
+          [target.x86_64-unknown-linux-gnu]
+          llvm-config = "$LLVM/bin/llvm-config"
+
+          [target.armv7-apple-ios]
+          llvm-config = "$LLVM/bin/llvm-config"
+          cc = "$CC"
+          cxx = "$CXX"
+          ar = "$TB/llvm-ar"
+          ranlib = "$TB/llvm-ranlib"
+          linker = "$TB/clang"
+          rustflags = ["-C", "link-arg=-Wl,-rpath,@loader_path/../lib", "-C", "link-arg=-Wl,-rpath,/var/root/llvm/lib", "-C", "link-arg=-lc++abi", "-C", "link-arg=-Wl,-dead_strip_dylibs", "-C", "link-arg=-Wl,-u,___atomic_compare_exchange", "-C", "link-arg=$GITHUB_WORKSPACE/shim/git2_shim.o"]
+
+          [dist]
+          src-tarball = false
+          EOF
+          cat config.toml
+
+      - name: Validate stage0 and llvm-config wrapper
+        run: |
+          set -euo pipefail
+          P="$GITHUB_WORKSPACE/stage0"
+          W="$GITHUB_WORKSPACE/llvm-ios/bin/llvm-config"
+          "$P/bin/rustc" --version
+          "$P/bin/rustc" --print target-list | grep -qx armv7-apple-ios
+          "$P/bin/cargo" --version
+          test "$($W --version)" = "23.1.1"
+          if $W --help 2>&1 | grep -q quote-paths; then
+            echo "::error::wrapper --help mentions quote-paths, rustc_llvm would take the quoted path branch"
+            exit 1
+          fi
+          COMP=$($W --components)
+          for r in ipo bitreader bitwriter linker asmparser lto coverage instrumentation; do
+            echo "$COMP" | tr ' ' '\n' | grep -qx "$r" || { echo "::error::missing component $r"; exit 1; }
+          done
+          echo "cxxflags: $($W --cxxflags)"
+          case "$($W --cxxflags)" in
+            *-std=c++20*) ;;
+            *) echo "::error::cxxflags must select C++20 for LLVM 23 headers"; exit 1;;
+          esac
+          echo "libs: $($W --link-shared --libs)"
+          echo "ldflags: $($W --link-shared --ldflags)"
+          test "$($W --libdir)" = "$GITHUB_WORKSPACE/llvm-ios/lib"
+          test "$($W --bindir)" = "$GITHUB_WORKSPACE/llvm-ios/bin"
+          echo "stage0 and wrapper OK"
+
+      - name: Validate bootstrap config
+        run: |
+          set -euo pipefail
+          python3 src/bootstrap/bootstrap.py build --stage 1 --dry-run compiler
+          python3 src/bootstrap/bootstrap.py build --stage 0 --dry-run library
+
+      - name: Write std sysroot seeder
+        run: |
+          set -euo pipefail
+          cat > "$GITHUB_WORKSPACE/seed_std.py" <<'PY'
+          import os, shutil, sys
+          dest = sys.argv[1]
+          cands = []
+          for dp, dn, fn in os.walk('build'):
+              if '.libstd-stamp' in fn and 'armv7-apple-ios' in dp:
+                  cands.append(os.path.join(dp, '.libstd-stamp'))
+          if not cands:
+              print('::error::.libstd-stamp for armv7-apple-ios not found', file=sys.stderr)
+              for dp, dn, fn in os.walk('build'):
+                  for f in fn:
+                      if f.startswith('.libstd-'):
+                          print('  candidate:', os.path.join(dp, f), file=sys.stderr)
+              sys.exit(1)
+          stamp = sorted(cands)[0]
+          print('stamp:', stamp)
+          base = os.path.join(dest, 'lib', 'rustlib', 'armv7-apple-ios')
+          tgt = os.path.join(base, 'lib')
+          sc = os.path.join(base, 'self-contained')
+          os.makedirs(tgt, exist_ok=True)
+          data = open(stamp, 'rb').read()
+          n_t = n_s = 0
+          for part in data.split(b'\0'):
+              if not part:
+                  continue
+              typ = chr(part[0])
+              src = part[1:].decode('utf-8', 'replace')
+              if typ == 'h':
+                  continue
+              if not os.path.exists(src):
+                  print('missing stamp entry:', src, file=sys.stderr)
+                  continue
+              d = sc if typ == 's' else tgt
+              os.makedirs(d, exist_ok=True)
+              out = os.path.join(d, os.path.basename(src))
+              with open(src, 'rb') as fi, open(out, 'wb') as fo:
+                  shutil.copyfileobj(fi, fo)
+              n_s += typ == 's'
+              n_t += typ == 't'
+          print('copied target=%d self-contained=%d into %s' % (n_t, n_s, dest))
+          if n_t == 0:
+              sys.exit(1)
+          PY
+          python3 -m py_compile "$GITHUB_WORKSPACE/seed_std.py"
+
+      - name: Build armv7 std
+        run: |
+          trap 'echo "::group::Disk usage at exit"; df -h; echo "::endgroup::"' EXIT
+          set -euo pipefail
+          CPU_CORES=$(nproc)
+          df -h
+          python3 src/bootstrap/bootstrap.py build --stage 0 --jobs ${CPU_CORES} library
+
+      - name: Seed stage0 sysroot with armv7 std
+        run: |
+          set -euo pipefail
+          P="$GITHUB_WORKSPACE/stage0"
+          python3 "$GITHUB_WORKSPACE/seed_std.py" "$P"
+          DST="$P/lib/rustlib/armv7-apple-ios/lib"
+          ls -la "$DST" | head -40
+          test -n "$(find "$DST" -maxdepth 1 -name 'libstd-*.rlib' -print -quit)"
+          test -n "$(find "$DST" -maxdepth 1 -name 'libcore-*.rlib' -print -quit)"
+          echo "stage0 armv7 std files: $(find "$DST" -maxdepth 1 -type f | wc -l)"
+          df -h
+
+      - name: Build stage1 rustc
+        run: |
+          trap 'echo "::group::Disk usage at exit"; df -h; sudo du -xh --max-depth=1 / 2>/dev/null | sort -rh | head -20; echo "::endgroup::"' EXIT
+          set -euo pipefail
+          CPU_CORES=$(nproc)
+          echo "Building using ${CPU_CORES} threads..."
+          df -h
+          python3 src/bootstrap/bootstrap.py build --stage 1 --jobs ${CPU_CORES} compiler
+
+      - name: Force vendored curl build
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/stub-bin"
+          cat > "$GITHUB_WORKSPACE/stub-bin/curl-config" <<'STUB'
+          #!/bin/sh
+          exit 1
+          STUB
+          chmod +x "$GITHUB_WORKSPACE/stub-bin/curl-config"
+          echo "PATH=$GITHUB_WORKSPACE/stub-bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Package with x dist
+        run: |
+          trap 'echo "::group::Disk usage at exit"; df -h; echo "::endgroup::"' EXIT
+          set -euo pipefail
+          CPU_CORES=$(nproc)
+          test -f build/armv7-apple-ios/stage1/bin/rustc
+          df -h
+          python3 src/bootstrap/bootstrap.py dist --stage 1 --jobs ${CPU_CORES} rustc cargo rustfmt
+          python3 src/bootstrap/bootstrap.py dist --stage 0 --jobs ${CPU_CORES} rust-std
+          ls -la build/dist/
+          test -f build/dist/rustc-nightly-armv7-apple-ios.tar.xz
+          test -f build/dist/cargo-nightly-armv7-apple-ios.tar.xz
+          test -f build/dist/rustfmt-nightly-armv7-apple-ios.tar.xz
+          test -f build/dist/rust-std-nightly-armv7-apple-ios.tar.xz
+
+      - name: Normalize dist tarballs
+        run: |
+          set -euo pipefail
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          OT="$TB/otool"
+          IT="$TB/install_name_tool"
+          FIX="$GITHUB_WORKSPACE/dist-fix"
+          rm -rf "$FIX"
+          mkdir -p "$FIX" dist_output
+          for T in rustc cargo rust-std rustfmt; do
+            NAME="${T}-nightly-armv7-apple-ios"
+            SRC="build/dist/${NAME}.tar.xz"
+            test -f "$SRC"
+            D="$FIX/$T"
+            mkdir -p "$D"
+            tar -xJf "$SRC" -C "$D"
+            if [ -f "$D/install.sh" ]; then
+              R="$D"
+              TOP=""
+            else
+              H=$(find "$D" -name install.sh -print -quit)
+              test -n "$H"
+              R=$(dirname "$H")
+              TOP=$(basename "$R")
+            fi
+            if [ "$T" = "rustc" ]; then
+              BIN=$(find "$R" -type f -name rustc -path '*/bin/*' -print -quit)
+              test -n "$BIN"
+              PAY=$(dirname "$(dirname "$BIN")")
+              mkdir -p "$PAY/lib"
+              if [ ! -e "$PAY/lib/libLLVM.dylib" ]; then
+                for f in "$GITHUB_WORKSPACE/llvm-ios/lib"/libLLVM*.dylib; do
+                  if [ -L "$f" ]; then
+                    ln -sfn "$(readlink "$f")" "$PAY/lib/$(basename "$f")"
+                  else
+                    cp -L "$f" "$PAY/lib/"
+                  fi
+                done
+              fi
+              test -e "$PAY/lib/libLLVM.dylib"
+              test -e "$PAY/lib/libLLVM.23.1.dylib"
+            fi
+            L="$FIX/loads.txt"
+            LIST="$FIX/macho.list"
+            find "$R" -type f \( -name '*.dylib' -o -name rustc -o -name cargo -o -perm -u+x \) -print0 > "$LIST"
+            fixed=0
+            while IFS= read -r -d '' f; do
+              "$OT" -L "$f" > "$L" 2>/dev/null || continue
+              while IFS= read -r p; do
+                case "$p" in
+                  /home/*)
+                    b=$(basename "$p")
+                    tp=$(find "$R" -name "$b" \( -type f -o -type l \) -print -quit)
+                    if [ -z "$tp" ] && [ "$R" != "$FIX/rustc" ] && [ -d "$FIX/rustc" ]; then
+                      tp=$(find "$FIX/rustc" -name "$b" \( -type f -o -type l \) -print -quit)
+                    fi
+                    if [ -n "$tp" ]; then
+                      "$IT" -change "$p" "@rpath/$b" "$f"
+                      echo "load $(basename "$f") -> @rpath/$b"
+                      fixed=$((fixed + 1))
+                    fi
+                    ;;
+                  /usr/lib/libc++*)
+                    b=$(basename "$p")
+                    "$IT" -change "$p" "/var/lib/$b" "$f"
+                    echo "load $(basename "$f") -> /var/lib/$b"
+                    fixed=$((fixed + 1))
+                    ;;
+                esac
+              done < <(tail -n +2 "$L" | sed 's/^[[:space:]]*//; s/ (compatibility.*//')
+              case "$f" in
+                *.dylib) "$IT" -id "@rpath/$(basename "$f")" "$f";;
+              esac
+            done < "$LIST"
+            echo "rewrote $fixed load commands in ${NAME}"
+            rpfixed=0
+            while IFS= read -r -d '' f; do
+              "$OT" -L "$f" > "$L" 2>/dev/null || continue
+              names=$(tail -n +2 "$L" | awk '{print $1}' | sed -n 's|^@rpath/||p' | sort -u)
+              [ -z "$names" ] && continue
+              fd=$(dirname "$f")
+              rps=$("$OT" -l "$f" 2>/dev/null | awk '/LC_RPATH/{f=1} f && / path /{sub(/^ *path /,""); sub(/ .*/,""); print; f=0}')
+              for rp in $rps; do
+                case "$rp" in
+                  /home/*)
+                    "$IT" -delete_rpath "$rp" "$f"
+                    echo "rpath $(basename "$f") -= $rp"
+                    rps=$(printf '%s\n' "$rps" | grep -vxF "$rp" || true)
+                    ;;
+                esac
+              done
+              for n in $names; do
+                ok=0
+                for rp in $rps; do
+                  case "$rp" in
+                    @loader_path*) d="$fd${rp#@loader_path}";;
+                    *) continue;;
+                  esac
+                  if [ -e "$d/$n" ]; then ok=1; break; fi
+                done
+                if [ "$ok" = 0 ]; then
+                  tp=$(find "$R" -name "$n" \( -type f -o -type l \) -print -quit)
+                  if [ -z "$tp" ] && [ "$R" != "$FIX/rustc" ] && [ -d "$FIX/rustc" ]; then
+                    tp=$(find "$FIX/rustc" -name "$n" \( -type f -o -type l \) -print -quit)
+                    if [ -n "$tp" ]; then
+                      if ! printf '%s\n' "$rps" | tr ' ' '\n' | grep -qxF '@loader_path/../lib'; then
+                        "$IT" -add_rpath "@loader_path/../lib" "$f"
+                        echo "rpath $(basename "$f") += @loader_path/../lib"
+                        rps="$rps @loader_path/../lib"
+                        rpfixed=$((rpfixed + 1))
+                      fi
+                      ok=1
+                    fi
+                  fi
+                fi
+                if [ "$ok" = 0 ]; then
+                  tp=$(find "$R" -name "$n" \( -type f -o -type l \) -print -quit)
+                  if [ -z "$tp" ]; then
+                    echo "::error::@rpath/$n not found anywhere in ${NAME}"
+                    exit 1
+                  fi
+                  rel=$(python3 -c 'import os,sys; print(os.path.relpath(os.path.dirname(sys.argv[1]), os.path.dirname(sys.argv[2])))' "$tp" "$f")
+                  case "$rel" in
+                    .) rp="@loader_path";;
+                    /*) rp="$rel";;
+                    *) rp="@loader_path/$rel";;
+                  esac
+                  if printf '%s\n' "$rps" | grep -qxF "$rp"; then
+                    echo "::error::@rpath/$n unresolvable but $rp already set in $f"
+                    exit 1
+                  fi
+                  "$IT" -add_rpath "$rp" "$f"
+                  echo "rpath $(basename "$f") += $rp"
+                  rps="$rps $rp"
+                  rpfixed=$((rpfixed + 1))
+                fi
+              done
+            done < "$LIST"
+            echo "added $rpfixed rpath entries in ${NAME}"
+            bad=0
+            while IFS= read -r -d '' f; do
+              "$OT" -L "$f" > "$L" 2>/dev/null || continue
+              if tail -n +2 "$L" | grep -qE "/home/|/usr/lib/libc\+\+"; then
+                echo "::error::stale load path left in $f"
+                tail -n +2 "$L"
+                bad=1
+              fi
+            done < "$LIST"
+            test "$bad" = 0
+            if [ -n "$TOP" ]; then
+              tar -cJf "dist_output/${NAME}.tar.xz" -C "$D" "$TOP"
+            else
+              tar -cJf "dist_output/${NAME}.tar.xz" -C "$D" .
+            fi
+          done
+          ls -la dist_output/
+
+      - name: Verify dist tarballs
+        run: |
+          set -euo pipefail
+          TB="$GITHUB_WORKSPACE/.toolchain/linux/iphone/bin"
+          OT="$TB/otool"
+          NM="$TB/llvm-nm"
+          [ -x "$NM" ] || NM="$TB/nm"
+          FIX="$GITHUB_WORKSPACE/dist-fix"
+          L="$FIX/loads.txt"
+          for T in rustc cargo rust-std rustfmt; do
+            test -f "dist_output/${T}-nightly-armv7-apple-ios.tar.xz"
+          done
+          RBIN=$(find "$FIX/rustc" -type f -name rustc -path '*/bin/*' -print -quit)
+          test -n "$RBIN"
+          RROOT=$(dirname "$(dirname "$RBIN")")
+          file "$RBIN" | grep -q "Mach-O"
+          file "$RBIN" | grep -qi "arm"
+          "$OT" -hv "$RBIN" | head -10
+          "$OT" -L "$RBIN"
+          if "$OT" -L "$RBIN" | tail -n +2 | grep -qE "/home/|linux-gnu|\.so"; then
+            echo "::error::bad load path in rustc binary"
+            "$OT" -L "$RBIN"
+            exit 1
+          fi
+          "$OT" -l "$RBIN" | grep -q LC_RPATH
+          unres=0
+          { find "$FIX/rustc" -type f -perm -u+x; find "$FIX/rustc" -type f -name '*.dylib'; } | sort -u > "$FIX/rustc.macho"
+          while IFS= read -r f; do
+            "$OT" -L "$f" > "$L" 2>/dev/null || continue
+            names=$(tail -n +2 "$L" | awk '{print $1}' | sed -n 's|^@rpath/||p' | sort -u)
+            [ -z "$names" ] && continue
+            fd=$(dirname "$f")
+            rps=$("$OT" -l "$f" 2>/dev/null | awk '/LC_RPATH/{f=1} f && / path /{sub(/^ *path /,""); sub(/ .*/,""); print; f=0}')
+            for n in $names; do
+              ok=0
+              for rp in $rps; do
+                case "$rp" in
+                  @loader_path*) d="$fd${rp#@loader_path}";;
+                  *) continue;;
+                esac
+                if [ -e "$d/$n" ]; then ok=1; break; fi
+              done
+              if [ "$ok" = 0 ]; then
+                echo "::error::unresolved @rpath/$n in $f"
+                unres=1
+              fi
+            done
+          done < "$FIX/rustc.macho"
+          test "$unres" = 0
+          test -e "$RROOT/lib/libLLVM.dylib"
+          test -e "$RROOT/lib/libLLVM.23.1.dylib"
+          find "$FIX/rustc" -name install.sh -print -quit
+          ls -la "$RROOT"
+          CBIN=$(find "$FIX/cargo" -type f -name cargo -path '*/bin/*' -print -quit)
+          test -n "$CBIN"
+          CB=$(dirname "$CBIN")
+          test -f "$CB/cargo"
+          file "$CB/cargo" | grep -q "Mach-O"
+          file "$CB/cargo" | grep -qi "arm"
+          "$OT" -hv "$CB/cargo" | head -10
+          "$OT" -L "$CB/cargo"
+          if "$OT" -L "$CB/cargo" | tail -n +2 | grep -qE "/home/|linux-gnu|\.so"; then
+            echo "::error::bad load path in cargo binary"
+            "$OT" -L "$CB/cargo"
+            exit 1
+          fi
+          if "$OT" -L "$CB/cargo" | tail -n +2 | grep -qE "UserNotifications\.framework|CloudKit\.framework|/CoreServices\.framework"; then
+            echo "::error::cargo binary links frameworks absent on iOS 6"
+            "$OT" -L "$CB/cargo"
+            exit 1
+          fi
+          "$NM" -u "$CB/cargo"
+          if "$NM" -u "$CB/cargo" | grep -qE '___atomic_(load|store|compare_exchange)$'; then
+            echo "::error::generic __atomic_* libcalls still imported from libSystem"
+            "$NM" -u "$CB/cargo" | grep atomic
+            exit 1
+          fi
+          FBIN=$(find "$FIX/rustfmt" -type f -name rustfmt -path '*/bin/*' -print -quit)
+          test -n "$FBIN"
+          file "$FBIN" | grep -q "Mach-O"
+          file "$FBIN" | grep -qi "arm"
+          "$OT" -hv "$FBIN" | head -10
+          "$OT" -L "$FBIN"
+          if "$OT" -L "$FBIN" | tail -n +2 | grep -qE "/home/|linux-gnu|\.so"; then
+            echo "::error::bad load path in rustfmt binary"
+            "$OT" -L "$FBIN"
+            exit 1
+          fi
+          "$OT" -l "$FBIN" | grep -q "@loader_path/../lib"
+          CBF=$(find "$FIX/rustfmt" -type f -name cargo-fmt -path '*/bin/*' -print -quit)
+          test -n "$CBF"
+          file "$CBF" | grep -q "Mach-O"
+          file "$CBF" | grep -qi "arm"
+          "$OT" -L "$CBF"
+          if "$OT" -L "$CBF" | tail -n +2 | grep -qE "/home/|linux-gnu|\.so"; then
+            echo "::error::bad load path in cargo-fmt binary"
+            "$OT" -L "$CBF"
+            exit 1
+          fi
+          unres2=0
+          for f in "$FBIN" "$CBF"; do
+            "$OT" -L "$f" > "$L" || continue
+            names=$(tail -n +2 "$L" | awk '{print $1}' | sed -n 's|^@rpath/||p' | sort -u)
+            [ -z "$names" ] && continue
+            fd=$(dirname "$f")
+            rps=$("$OT" -l "$f" 2>/dev/null | awk '/LC_RPATH/{f=1} f && / path /{sub(/^ *path /,""); sub(/ .*/,""); print; f=0}')
+            for n in $names; do
+              ok=0
+              for rp in $rps; do
+                case "$rp" in
+                  @loader_path*) d="$fd${rp#@loader_path}";;
+                  *) continue;;
+                esac
+                if [ -e "$d/$n" ]; then ok=1; break; fi
+              done
+              if [ "$ok" = 0 ] && find "$FIX/rustfmt" -name "$n" \( -type f -o -type l \) -print -quit | grep -q .; then
+                ok=1
+              fi
+              if [ "$ok" = 0 ] && find "$FIX/rustc" -name "$n" \( -type f -o -type l \) -print -quit | grep -q .; then
+                ok=1
+              fi
+              if [ "$ok" = 0 ]; then
+                echo "::error::unresolved @rpath/$n in $f"
+                unres2=1
+              fi
+            done
+          done
+          test "$unres2" = 0
+          find "$FIX/rustfmt" -name install.sh -print -quit
+          if ! find "$FIX/rust-std" -type f -name 'libstd-*.rlib' -print -quit | grep -q .; then
+            echo "::error::libstd rlib missing from rust-std tarball"
+            exit 1
+          fi
+          find "$FIX/rust-std" -name install.sh -print -quit
+          find "$FIX/rust-std" -type f > "$FIX/std.list"
+          sed -n '1,30p' "$FIX/std.list"
+          echo "all dist tarballs verified"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-nightly-armv7-apple-ios
+          path: dist_output/
+          retention-days: 7
+          if-no-files-found: error
