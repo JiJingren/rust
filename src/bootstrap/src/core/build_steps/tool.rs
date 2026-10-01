@@ -374,9 +374,7 @@ pub(crate) fn get_tool_target_compiler(
     let compiler = if builder.host_target == target {
         builder.compiler(build_compiler_stage, builder.host_target)
     } else {
-        // If we are cross-compiling a stage 1 tool, we cannot do that with a stage 0 compiler,
-        // so we auto-bump the tool's stage to 2, which means we need a stage 1 compiler.
-        let build_compiler = builder.compiler(build_compiler_stage.max(1), builder.host_target);
+        let build_compiler = builder.compiler(build_compiler_stage, builder.host_target);
         // We also need the host stdlib to compile host code (proc macros/build scripts)
         builder.std(build_compiler, builder.host_target);
         build_compiler
