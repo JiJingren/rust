@@ -703,15 +703,16 @@ impl CommandLineStep for Rustc {
 }
 
 fn generate_target_spec_json_schema(builder: &Builder<'_>, sysroot: &Path) {
-    // Since we run rustc in bootstrap, we need to ensure that we use the host compiler.
-    // We do this by using the stage 1 compiler, which is always compiled for the host,
-    // even in a cross build.
-    let stage1_host = builder.compiler(1, builder.host_target);
-    let mut rustc = builder.rustc_cmd(stage1_host).fail_fast();
+    let mut rustc = command(&builder.initial_rustc).allow_failure();
     rustc
         .env("RUSTC_BOOTSTRAP", "1")
         .args(["--print=target-spec-json-schema", "-Zunstable-options"]);
-    let schema = rustc.run_capture(builder).stdout();
+    let output = rustc.run_capture(builder);
+    if !output.is_success() {
+        builder.info("skipping target-spec-json-schema (initial rustc failed to generate it)");
+        return;
+    }
+    let schema = output.stdout();
 
     let schema_dir = tmpdir(builder);
     t!(fs::create_dir_all(&schema_dir));
